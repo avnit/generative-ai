@@ -2,9 +2,10 @@
 
 [![Run on Google Cloud](https://deploy.cloud.run/button.svg)](https://deploy.cloud.run)
 
-|           |                                                                                                |
-| --------- | ---------------------------------------------------------------------------------------------- |
-| Author(s) | [Lavi Nigam](https://github.com/lavinigam-gcp), [Holt Skinner](https://github.com/holtskinner) |
+| Authors                                        |
+|------------------------------------------------|
+| [Lavi Nigam](https://github.com/lavinigam-gcp) |
+| [Holt Skinner](https://github.com/holtskinner) |
 
 This application demonstrates a Cloud Run application that uses the [Streamlit](https://streamlit.io/) framework.
 
@@ -21,7 +22,7 @@ Sample screenshots and video demos of the application are shown below:
 
 To run the Streamlit Application locally (on Cloud Shell), we need to perform the following steps:
 
-1. Setup the Python virtual environment and install the dependencies:
+1. Set up the Python virtual environment and install the dependencies:
 
    In Cloud Shell, execute the following commands:
 
@@ -58,7 +59,7 @@ To run the Streamlit Application locally (on Cloud Shell), we need to perform th
      --server.port 8080
    ```
 
-The application will startup and you will be provided a URL to the application. Use Cloud Shell's [web preview](https://cloud.google.com/shell/docs/using-web-preview) function to launch the preview page. You may also visit that in the browser to view the application. Choose the functionality that you would like to check out and the application will prompt the Gemini API in Vertex AI and display the responses.
+The application will start up and you will be provided a URL to the application. Use Cloud Shell's [web preview](https://cloud.google.com/shell/docs/using-web-preview) function to launch the preview page. You may also visit that in the browser to view the application. Choose the functionality that you would like to check out and the application will prompt the Gemini API in Vertex AI and display the responses.
 
 ## Build and Deploy the Application to Cloud Run
 

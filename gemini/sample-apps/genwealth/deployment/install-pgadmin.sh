@@ -53,7 +53,7 @@ EOF
 )
 echo $sql | PGPASSWORD=${ALLOYDB_PASSWORD} psql -h "${ALLOYDB_IP}" -U postgres -d ragdemos
 
-# Register textembedding-gecko embedding model
+# Register text-embedding-005 embedding model
 sql=$(
   cat <<EOF
 CALL google_ml.create_model (
@@ -209,7 +209,7 @@ echo "Downloading data"
 cd || echo "Could not cd into user profile root"
 mkdir -p /tmp/demo-data
 cd /tmp/demo-data || echo "Could not cd into user profile root"
-gsutil -m cp \
+gcloud storage cp \
   "gs://pr-public-demo-data/genwealth-demo/investments-005" \
   "gs://pr-public-demo-data/genwealth-demo/user_profiles-005" \
   "gs://pr-public-demo-data/genwealth-demo/llm-gemini.sql" .
