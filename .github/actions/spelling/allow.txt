@@ -7,6 +7,7 @@ Abhishek
 acall
 achat
 Achird
+AClient
 acomplete
 adamw
 ADAS
@@ -106,6 +107,7 @@ avec
 Avenir
 aworkflow
 axs
+axvline
 Ayra
 Ayyappa
 backstory
@@ -132,6 +134,7 @@ bgr
 BGR
 bgswap
 Bhagwat
+Bharath
 Biden
 bigframes
 bigquery
@@ -163,6 +166,7 @@ bqdf
 bqds
 bqml
 breakroom
+briest
 Broadoak
 Brusdar
 Brynner
@@ -197,6 +201,7 @@ cbp
 ccc
 cce
 cctv
+CDIP
 cdiv
 CDNs
 ceb
@@ -251,6 +256,7 @@ colorway
 colurna
 colvis
 colwidth
+Cómo
 Connectez
 CONOUT
 constexpr
@@ -270,6 +276,7 @@ cpb
 cpet
 crewai
 CRF
+cristo
 crm
 CRM
 Crossbody
@@ -317,6 +324,7 @@ Demme
 demouser
 dente
 Depatmint
+Derpanis
 descgen
 deskmates
 Dexin
@@ -349,6 +357,7 @@ Downscale
 dpi
 dpo
 DPO
+DQN
 draig
 Dreesen
 drilldown
@@ -380,11 +389,13 @@ Dzor
 ecommerce
 EDB
 edgecolor
+edgelist
 edu
 Edu
 EDU
 Edunov
 eee
+effi
 EHR
 EHsc
 EIC
@@ -466,6 +477,7 @@ figsize
 figwidth
 FILEFLAGS
 FILEOS
+filestem
 fillmode
 fillna
 Finvest
@@ -486,6 +498,7 @@ FLX
 fmeasure
 FMWK
 Folmer
+fontane
 fontdict
 footwell
 forbes
@@ -608,6 +621,8 @@ gtk
 guanciale
 Gundogan
 gunicorn
+gutenberg
+Guterres
 GWLP
 hadolint
 hahaha
@@ -619,6 +634,7 @@ Hannaneh
 Harvick
 hashtag
 hashtags
+Haumea
 Hawkins'll
 Hayao
 Hbf
@@ -642,6 +658,7 @@ Hikaru
 Hiromasa
 Hisaki
 historien
+histplot
 Hlc
 Hmmm
 HMO
@@ -673,6 +690,7 @@ HZN
 iap
 iban
 icd
+ICDAR
 ICICI
 ICML
 icudtl
@@ -680,11 +698,13 @@ idcg
 idk
 idks
 idxs
+IEA
 ience
 ifconfig
 IFI
 ifidx
 iinfo
+IIT
 ILB
 Ilkay
 iloc
@@ -771,6 +791,7 @@ Kanagawa
 Katsura
 Kaufmanns
 Kawagoe
+kde
 Keanu
 kendall
 kenleejr
@@ -825,6 +846,7 @@ lecie
 lego
 lenzing
 Levaquin
+levelized
 levelname
 Leventer
 lexer
@@ -860,6 +882,7 @@ lookml
 Lopyrev
 loras
 Lottry
+louvain
 lparam
 LRESULT
 lro
@@ -887,6 +910,7 @@ magika
 Mahindra
 mahut
 mai
+Makemake
 makeover
 Malware
 Mamah
@@ -953,6 +977,7 @@ MMLU
 MMO
 mmol
 mmr
+Mnih
 modelfile
 Molaison
 monty
@@ -980,6 +1005,7 @@ Mvar
 mvn
 mvnw
 mvp
+MWh
 mwouts
 myaccount
 mydb
@@ -1082,6 +1108,7 @@ OMR
 onesie
 onesies
 Onone
+OOD
 OOM
 Oort
 OOTB
@@ -1143,6 +1170,7 @@ PGUSER
 pgvector
 Phaidon
 Phanfone
+pharma
 Pharma
 phellos
 Photoshop
@@ -1205,6 +1233,7 @@ pyautogen
 pyav
 pybind
 pydantic
+pydrive
 pydub
 PYINK
 pymupdf
@@ -1216,6 +1245,7 @@ pytrec
 pyupgrade
 pyvis
 Pzk
+Qantas
 qas
 QEDC
 QLo
@@ -1244,9 +1274,11 @@ rahhhrr
 rai
 Raikkonen
 Rajpurkar
+Ramblas
 ramen
 Ranurte
 rapideval
+raquin
 rarian
 rarians
 ratelimit
@@ -1307,6 +1339,7 @@ Ruchika
 runjdwp
 RUNPATH
 Rupjit
+RVL
 RVR
 RYDE
 saaagesh
@@ -1358,6 +1391,7 @@ SHEBA
 shedd
 Shenzhou
 Shibuya
+Shinjuku
 Shklovsky
 Shohei
 shortdesc
@@ -1486,6 +1520,7 @@ TGI
 tgz
 Thallam
 thelook
+thér
 THH
 THHH
 thi
@@ -1552,6 +1587,7 @@ ubuntu
 udf
 UDF
 UDFs
+Ufkes
 uids
 UIs
 Ukiyo
@@ -1599,6 +1635,7 @@ Vayots
 VBG
 vcodec
 VCPU
+vdb
 vectoral
 vectordb
 veo
@@ -1628,6 +1665,7 @@ VMAF
 VMs
 vnc
 voiceover
+Volodymyr
 vos
 VOS
 votre
@@ -1669,6 +1707,7 @@ welcom
 Welwyn
 werden
 wereld
+werther
 WFH
 wght
 whitegrid
@@ -1729,6 +1768,7 @@ yanchor
 yaxes
 yaxis
 ycol
+ydf
 yedoensis
 Ykb
 ylabel
@@ -1742,6 +1782,7 @@ yref
 ytd
 ytick
 yticks
+Yuxi
 Yuxuan
 Yuzuru
 zakarid
@@ -1757,6 +1798,7 @@ zimie
 Zinnemann
 Zizu
 zmin
+zola
 Zom
 Zosyn
 Zscaler
