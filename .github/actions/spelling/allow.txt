@@ -40,11 +40,13 @@ Aktu
 ALCS
 ALDS
 Alessia
+algo
 Alibaba
 alisal
 alloydb
 Alok
 ALPHAFOLD
+ambiently
 AMNOSH
 amurensis
 Anant
@@ -123,6 +125,7 @@ bayes
 bbc
 bbq
 beir
+bennett
 Benno
 bert
 Bettes
@@ -445,6 +448,10 @@ euchlora
 eula
 eur
 evals
+evalset
+Evalset
+evalsets
+Evalsets
 eventarc
 Eventarc
 EVs
@@ -624,6 +631,7 @@ gunicorn
 gutenberg
 Guterres
 GWLP
+hacer
 hadolint
 hahaha
 Haichao
@@ -755,6 +763,7 @@ javac
 JAVACMD
 Jax
 JDK
+jdoe
 Jedi
 Jeeg
 jegadesh
@@ -775,6 +784,7 @@ Jolyon
 Jostar
 JPY
 jsemer
+jsonable
 jsonify
 jsonlines
 jsonpath
@@ -786,11 +796,13 @@ Kaelen
 kaggle
 Kalai
 Kalamang
+kamada
 Kamradt
 Kanagawa
 Katsura
 Kaufmanns
 Kawagoe
+kawai
 kde
 Keanu
 kendall
@@ -1087,6 +1099,7 @@ NVL
 NYT
 oai
 objc
+ocr
 ODb
 oglevel
 Ohashi
@@ -1260,6 +1273,7 @@ qubits
 quickbot
 Quickbot
 quicktime
+quieres
 quippy
 qwen
 Qwen
@@ -1368,6 +1382,7 @@ selectbox
 selfie
 selftext
 selkirk
+SEMCONV
 seo
 SEO
 serde
@@ -1499,6 +1514,7 @@ Tbl
 TBY
 TCEHY
 telework
+tema
 tencel
 Tencent
 terabyte
@@ -1520,7 +1536,6 @@ TGI
 tgz
 Thallam
 thelook
-thér
 THH
 THHH
 thi
@@ -1546,6 +1561,7 @@ Tongsheng
 toolcall
 toolsets
 toolu
+topbar
 Topolino
 toself
 toset
