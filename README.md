@@ -138,3 +138,34 @@ Please use the [issues page](https://github.com/GoogleCloudPlatform/generative-a
 ## Disclaimer
 
 This repository itself is not an officially supported Google product. The code in this repository is for demonstrative purposes only.
+
+<!-- ARCH-DIAGRAM:START -->
+
+## Architecture
+
+> Auto-generated architecture diagram. See [`docs/context-map.md`](docs/context-map.md) for the full context map (core application, containers/cloud, and database connections).
+
+```mermaid
+flowchart TD
+  User([User / Client])
+  UI["Frontend:8000/8888/1700<br/>React / Streamlit"]
+  App["generative-ai<br/><small>main.go</small><br/>FastAPI + Uvicorn / Express / Node"]
+  AI["Vertex AI / Gemini<br/>(LLM / Agent Engine)"]
+  DB0[("SQLite")]
+  DB1[("BigQuery (analytics)")]
+  SVC0["Firebase / Firestore"]
+  Img["Container image<br/>(Docker/Compose)"]
+  TF["Terraform<br/>(infra)"]
+  Deploy["Google Cloud Run"]
+  User --> UI
+  UI --> App
+  App --> AI
+  App --> DB0
+  App --> DB1
+  App --> SVC0
+  App -.deploy.-> Img
+  Img -.deploy.-> TF
+  TF -.deploy.-> Deploy
+```
+
+<!-- ARCH-DIAGRAM:END -->
