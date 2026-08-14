@@ -1,0 +1,1633 @@
+/*
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/* ==========================================================================
+   Google Cloud & Material Design 3 UI Theme
+   Zero-Trust Autonomous Agent Gateway (Gemini & Vertex AI Agent Platform)
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Theme Token System: Google Material Light Mode (Default) & Dark Mode
+   -------------------------------------------------------------------------- */
+
+body.theme-light {
+    --bg-app: #f8f9fa;             /* Google Workspace / Cloud warm gray surface */
+    --bg-card: #ffffff;            /* Crisp pure Google white cards */
+    --bg-card-hover: #f1f3f4;
+    --bg-input: #ffffff;
+    --bg-console: #1e1f20;         /* Dark technical console inside light UI */
+    --border: #dadce0;             /* Google Material neutral border */
+    --border-hover: #1a73e8;       /* Classic Google Blue hover */
+    --border-focus: #1a73e8;
+    
+    --text-primary: #202124;       /* High-contrast Google primary text */
+    --text-secondary: #5f6368;     /* Google medium charcoal text */
+    --text-muted: #80868b;         /* Google subtle metadata gray */
+    
+    /* Signature Google Brand Palette (Light Mode) */
+    --blue: #1a73e8;               /* Google Blue */
+    --blue-light: #e8f0fe;
+    --blue-tint: rgba(26, 115, 232, 0.08);
+    
+    --purple: #9334e6;             /* Google Gemini Purple */
+    --purple-light: #f3e8fd;
+    --purple-tint: rgba(147, 52, 230, 0.08);
+    
+    --success: #1e8e3e;            /* Google Green */
+    --success-light: #e6f4ea;
+    --success-tint: rgba(30, 142, 62, 0.08);
+    
+    --danger: #d93025;             /* Google Red */
+    --danger-light: #fce8e6;
+    --danger-tint: rgba(217, 48, 37, 0.08);
+    
+    --amber: #f9ab00;              /* Google Yellow / Warning */
+    --amber-light: #fef7e0;
+    --amber-tint: rgba(249, 171, 0, 0.08);
+    
+    --gemini-gradient: linear-gradient(90deg, #4285F4 0%, #9334E6 30%, #C084FC 70%, #EA4335 100%);
+    --gemini-sparkle: linear-gradient(135deg, #4285F4 0%, #9B72CB 50%, #D96A8D 100%);
+    
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-pill: 20px;
+    
+    --shadow-sm: 0 1px 2px 0 rgba(60,64,67,0.12), 0 1px 3px 1px rgba(60,64,67,0.08);
+    --shadow-md: 0 1px 3px 0 rgba(60,64,67,0.18), 0 4px 8px 3px rgba(60,64,67,0.08);
+    --shadow-lg: 0 2px 6px 2px rgba(60,64,67,0.18), 0 10px 20px 6px rgba(60,64,67,0.12);
+    
+    --font-heading: 'Google Sans', 'Roboto', sans-serif;
+    --font-body: 'Roboto', sans-serif;
+    --font-mono: 'Roboto Mono', monospace;
+    
+    --transition-fast: 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-smooth: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+body.theme-dark {
+    --bg-app: #131314;             /* Google AI Studio Dark Background */
+    --bg-card: #1e1f20;            /* Google AI Studio Elevated Card */
+    --bg-card-hover: #282a2c;
+    --bg-input: #2a2b2d;
+    --bg-console: #0f0f10;
+    --border: #3c4043;             /* Google Cloud standard dark border */
+    --border-hover: #8ab4f8;       /* Google Blue dark accent */
+    --border-focus: #8ab4f8;
+    
+    --text-primary: #e3e3e3;       /* Google light text */
+    --text-secondary: #c4c7c5;     /* Google secondary text */
+    --text-muted: #8e918f;         /* Google muted gray */
+    
+    /* Signature Google Brand Palette (Dark Mode) */
+    --blue: #8ab4f8;               /* Google Blue Dark */
+    --blue-light: #aecbfa;
+    --blue-tint: rgba(138, 180, 248, 0.12);
+    
+    --purple: #c5a3ff;             /* Gemini Purple Dark */
+    --purple-light: #d7c4ff;
+    --purple-tint: rgba(197, 163, 255, 0.12);
+    
+    --success: #81c995;            /* Google Green Dark */
+    --success-light: #a8dab5;
+    --success-tint: rgba(129, 201, 149, 0.12);
+    
+    --danger: #f28b82;             /* Google Red Dark */
+    --danger-light: #f6aea9;
+    --danger-tint: rgba(242, 139, 130, 0.12);
+    
+    --amber: #fdd663;              /* Google Yellow Dark */
+    --amber-light: #ffe082;
+    --amber-tint: rgba(253, 214, 99, 0.12);
+    
+    --gemini-gradient: linear-gradient(90deg, #38bdf8 0%, #818cf8 30%, #c084fc 70%, #fb7185 100%);
+    --gemini-sparkle: linear-gradient(135deg, #4285f4 0%, #9b72cb 50%, #d96a8d 100%);
+    
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-pill: 20px;
+    
+    --shadow-sm: 0 1px 2px 0 rgba(0,0,0,0.3), 0 1px 3px 1px rgba(0,0,0,0.15);
+    --shadow-md: 0 1px 3px 0 rgba(0,0,0,0.3), 0 4px 8px 3px rgba(0,0,0,0.15);
+    --shadow-lg: 0 2px 6px 2px rgba(0,0,0,0.3), 0 10px 20px 6px rgba(0,0,0,0.15);
+    
+    --font-heading: 'Google Sans', 'Roboto', sans-serif;
+    --font-body: 'Roboto', sans-serif;
+    --font-mono: 'Roboto Mono', monospace;
+    
+    --transition-fast: 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-smooth: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* --------------------------------------------------------------------------
+   Google Signature 4-Color Top Stripe Banner
+   -------------------------------------------------------------------------- */
+.google-brand-stripe {
+    height: 4px;
+    width: 100%;
+    background: linear-gradient(
+        90deg,
+        #4285F4 0%, #4285F4 25%,
+        #EA4335 25%, #EA4335 50%,
+        #FBBC05 50%, #FBBC05 75%,
+        #34A853 75%, #34A853 100%
+    );
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+}
+
+/* --------------------------------------------------------------------------
+   Base Reset & Page Layout
+   -------------------------------------------------------------------------- */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: var(--bg-app);
+    color: var(--text-primary);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.6;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+    transition: background-color var(--transition-smooth), color var(--transition-smooth);
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+::-webkit-scrollbar-track {
+    background: var(--bg-app);
+}
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: var(--radius-sm);
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
+}
+
+/* Container */
+.app-container {
+    max-width: 1440px;
+    margin: 0 auto;
+    padding: 16px 24px 32px 24px;
+    min-height: calc(100vh - 4px);
+    display: flex;
+    flex-direction: column;
+}
+
+/* --------------------------------------------------------------------------
+   Google Cloud Console Top Navigation Bar Header
+   -------------------------------------------------------------------------- */
+.app-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 20px;
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    margin-bottom: 20px;
+    box-shadow: var(--shadow-sm);
+    flex-wrap: wrap;
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.header-logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.logo-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    background: var(--bg-app);
+    border-radius: 10px;
+    border: 1px solid var(--border);
+}
+
+.google-g-icon {
+    width: 22px;
+    height: 22px;
+}
+
+.logo-text h1 {
+    font-family: var(--font-heading);
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text-primary);
+    line-height: 1.3;
+}
+
+.header-divider {
+    color: var(--border);
+    margin: 0 4px;
+}
+
+.logo-subtitle {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: var(--font-heading);
+    font-weight: 500;
+}
+
+/* Google Cloud Project Selector Chip */
+.gcp-project-selector {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background-color: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    font-family: var(--font-heading);
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: var(--transition-fast);
+}
+
+.gcp-project-selector:hover {
+    border-color: var(--blue);
+    background-color: var(--blue-tint);
+}
+
+.project-icon {
+    color: var(--blue);
+}
+
+.project-arrow {
+    font-size: 9px;
+    color: var(--text-muted);
+}
+
+/* Google Cloud Command Search Input Mock */
+.gcp-search-bar {
+    flex: 1;
+    max-width: 380px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background-color: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    padding: 6px 14px;
+    transition: var(--transition-fast);
+}
+
+.gcp-search-bar:focus-within {
+    border-color: var(--blue);
+    box-shadow: 0 0 0 2px var(--blue-tint);
+}
+
+.gcp-search-bar .search-icon {
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.gcp-search-bar input {
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-family: var(--font-body);
+    font-size: 13px;
+    width: 100%;
+    outline: none;
+}
+
+.gcp-search-bar input::placeholder {
+    color: var(--text-muted);
+}
+
+.shortcut-badge {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+}
+
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+/* System Stats Bar */
+.system-stats {
+    display: flex;
+    gap: 18px;
+    align-items: center;
+    border-right: 1px solid var(--border);
+    padding-right: 16px;
+}
+
+.stat-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+}
+
+.stat-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-family: var(--font-heading);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.stat-value {
+    font-size: 12.5px;
+    font-weight: 500;
+    font-family: var(--font-heading);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.pulse-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+}
+
+.pulse-dot.bg-success {
+    background-color: var(--success);
+    box-shadow: 0 0 6px var(--success);
+    animation: pulse-green 2s infinite;
+}
+
+@keyframes pulse-green {
+    0%, 100% { transform: scale(0.9); opacity: 0.8; }
+    50% { transform: scale(1.15); opacity: 1; }
+}
+
+/* Theme Mode Toggle Button */
+.theme-toggle-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border);
+    background-color: var(--bg-app);
+    color: var(--text-primary);
+    font-family: var(--font-heading);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: var(--transition-fast);
+}
+
+.theme-toggle-btn:hover {
+    border-color: var(--blue);
+    background-color: var(--blue-tint);
+}
+
+body.theme-light .theme-icon-dark { display: none; }
+body.theme-dark .theme-icon-light { display: none; }
+
+/* User Avatar chip */
+.gcp-user-profile {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+}
+
+.user-avatar-circle {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #1A73E8 0%, #9334E6 100%);
+    color: #ffffff;
+    font-family: var(--font-heading);
+    font-weight: 700;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+}
+
+/* --------------------------------------------------------------------------
+   Material Design Tab Navigation Bar
+   -------------------------------------------------------------------------- */
+.app-tabs {
+    display: flex;
+    gap: 6px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 20px;
+    padding-left: 4px;
+    overflow-x: auto;
+}
+
+.tab-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 18px;
+    background: none;
+    border: none;
+    border-bottom: 3px solid transparent;
+    border-radius: 8px 8px 0 0;
+    color: var(--text-secondary);
+    font-family: var(--font-heading);
+    font-size: 13.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: var(--transition-fast);
+    white-space: nowrap;
+}
+
+.tab-btn:hover {
+    color: var(--text-primary);
+    background-color: var(--blue-tint);
+}
+
+.tab-btn.active {
+    color: var(--blue);
+    border-bottom-color: var(--blue);
+    background-color: var(--blue-tint);
+}
+
+.tab-btn svg {
+    opacity: 0.8;
+}
+
+.tab-btn.active svg {
+    stroke: var(--blue);
+    opacity: 1;
+}
+
+/* --------------------------------------------------------------------------
+   Tab Content Panes & Grids
+   -------------------------------------------------------------------------- */
+.tab-pane {
+    display: none;
+    animation: fade-in var(--transition-smooth);
+}
+
+.tab-pane.active {
+    display: block;
+}
+
+@keyframes fade-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.grid-2col {
+    display: grid;
+    grid-template-columns: 1.15fr 0.85fr;
+    gap: 20px;
+    align-items: start;
+}
+
+@media (max-width: 1080px) {
+    .grid-2col {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* --------------------------------------------------------------------------
+   Google Material Cards & Section Header Badges
+   -------------------------------------------------------------------------- */
+.card {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: var(--shadow-sm);
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.card:hover {
+    box-shadow: var(--shadow-md);
+}
+
+.card-header {
+    margin-bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.card-header h2 {
+    font-family: var(--font-heading);
+    font-size: 20px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.card-header h3 {
+    font-family: var(--font-heading);
+    font-size: 17px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+/* Google Material Status Badges */
+.badge {
+    display: inline-flex;
+    align-items: center;
+    width: fit-content;
+    padding: 3px 10px;
+    border-radius: var(--radius-pill);
+    font-family: var(--font-heading);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.badge-primary {
+    background-color: var(--blue-tint);
+    color: var(--blue);
+    border: 1px solid var(--blue-tint);
+}
+
+.badge-secondary {
+    background-color: var(--bg-app);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+}
+
+.badge-success {
+    background-color: var(--success-tint);
+    color: var(--success);
+}
+
+.badge-danger {
+    background-color: var(--danger-tint);
+    color: var(--danger);
+}
+
+/* Lead text */
+.lead {
+    font-size: 14.5px;
+    color: var(--text-primary);
+    line-height: 1.65;
+    margin-bottom: 14px;
+}
+
+.card-desc {
+    font-size: 13.5px;
+    color: var(--text-secondary);
+    margin-bottom: 18px;
+    line-height: 1.6;
+}
+
+/* --------------------------------------------------------------------------
+   Overview Threat Features & Visual Diagrams
+   -------------------------------------------------------------------------- */
+.threat-features {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-top: 18px;
+}
+
+.threat-feature-item {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background-color: var(--bg-app);
+    transition: var(--transition-fast);
+}
+
+.threat-feature-item:hover {
+    border-color: var(--blue);
+    background-color: var(--blue-tint);
+}
+
+.icon-wrap {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.bg-blue-tint { background-color: var(--blue-tint); color: var(--blue); }
+.bg-purple-tint { background-color: var(--purple-tint); color: var(--purple); }
+.bg-amber-tint { background-color: var(--amber-tint); color: var(--amber); }
+
+.threat-feature-item h4 {
+    font-family: var(--font-heading);
+    font-size: 14.5px;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+}
+
+.threat-feature-item p {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+/* Architectural SVG Diagram */
+.architecture-diagram {
+    background-color: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 16px;
+    margin-bottom: 16px;
+    display: flex;
+    justify-content: center;
+}
+
+/* Google Cloud Product Mapping Cards */
+.gcp-products-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 18px;
+    margin-top: 20px;
+}
+
+.gcp-product-item {
+    background-color: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 18px;
+    transition: var(--transition-fast);
+}
+
+.gcp-product-item:hover {
+    border-color: var(--blue);
+}
+
+.product-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: var(--radius-pill);
+    font-size: 11px;
+    font-weight: 500;
+    font-family: var(--font-heading);
+    margin-bottom: 10px;
+}
+
+.gcp-product-item h3 {
+    font-family: var(--font-heading);
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin-bottom: 10px;
+}
+
+.gcp-product-item p {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+/* --------------------------------------------------------------------------
+   Google Material UI Buttons & Form Components
+   -------------------------------------------------------------------------- */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 9px 18px;
+    border-radius: var(--radius-pill);
+    font-family: var(--font-heading);
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: var(--transition-fast);
+}
+
+.btn-primary {
+    background-color: var(--blue);
+    color: #ffffff;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+}
+
+.btn-primary:hover {
+    filter: brightness(1.08);
+    box-shadow: var(--shadow-sm);
+}
+
+.btn-secondary {
+    background-color: var(--bg-app);
+    color: var(--text-primary);
+    border-color: var(--border);
+}
+
+.btn-secondary:hover {
+    border-color: var(--blue);
+    background-color: var(--blue-tint);
+}
+
+.btn-warning {
+    background-color: var(--amber);
+    color: #202124;
+}
+
+.btn-warning:hover {
+    filter: brightness(1.05);
+}
+
+.btn-sm {
+    padding: 5px 12px;
+    font-size: 12px;
+}
+
+.form-group {
+    margin-bottom: 16px;
+}
+
+.form-group label {
+    display: block;
+    font-family: var(--font-heading);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin-bottom: 6px;
+}
+
+.form-control {
+    width: 100%;
+    padding: 10px 14px;
+    background-color: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font-body);
+    font-size: 13.5px;
+    outline: none;
+    transition: var(--transition-fast);
+}
+
+.form-control:focus {
+    border-color: var(--blue);
+    box-shadow: 0 0 0 2px var(--blue-tint);
+}
+
+/* --------------------------------------------------------------------------
+   Simulators: Pillar 1 Cryptographic Identity
+   -------------------------------------------------------------------------- */
+.sim-section {
+    margin-bottom: 24px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.sim-section:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
+
+.section-title {
+    font-family: var(--font-heading);
+    font-size: 14.5px;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin-bottom: 12px;
+}
+
+.agent-identity-box {
+    background-color: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 16px;
+}
+
+.identity-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.agent-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background-color: var(--blue-tint);
+    color: var(--blue);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.identity-header strong {
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    color: var(--text-primary);
+    display: block;
+}
+
+.identity-header .subtext {
+    font-size: 11.5px;
+    color: var(--text-muted);
+}
+
+.key-display-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+@media (max-width: 768px) {
+    .key-display-grid { grid-template-columns: 1fr; }
+}
+
+.key-display-grid label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: var(--font-heading);
+    font-weight: 500;
+    display: block;
+    margin-bottom: 4px;
+}
+
+.key-field {
+    background-color: var(--bg-console);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    overflow-x: auto;
+    white-space: nowrap;
+}
+
+.crypto-flow-log {
+    background-color: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 14px;
+    margin-top: 14px;
+}
+
+.flow-step {
+    margin-bottom: 10px;
+}
+
+.step-badge {
+    display: inline-block;
+    font-family: var(--font-heading);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--blue);
+    margin-bottom: 4px;
+}
+
+.flow-step pre {
+    background-color: var(--bg-console);
+    color: #a8dab5;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    overflow-x: auto;
+}
+
+.verification-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-heading);
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.verification-banner.success {
+    background-color: var(--success-tint);
+    color: var(--success);
+    border: 1px solid var(--success-tint);
+}
+
+/* Ledger Table */
+.table-container {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    margin-top: 10px;
+}
+
+.ledger-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+    text-align: left;
+}
+
+.ledger-table th {
+    background-color: var(--bg-app);
+    padding: 10px 12px;
+    font-family: var(--font-heading);
+    font-weight: 500;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
+}
+
+.ledger-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+}
+
+.editable-td {
+    background-color: var(--bg-input);
+    font-family: var(--font-mono);
+    color: var(--blue);
+    outline: none;
+    border-radius: 4px;
+    cursor: text;
+}
+
+.editable-td:focus {
+    box-shadow: 0 0 0 2px var(--blue);
+}
+
+.signature-cell {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.action-bar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+}
+
+.audit-badge {
+    padding: 4px 12px;
+    border-radius: var(--radius-pill);
+    font-family: var(--font-heading);
+    font-size: 12px;
+    font-weight: 500;
+    background-color: var(--bg-app);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+}
+
+.alert-box {
+    padding: 14px 18px;
+    border-radius: var(--radius-md);
+    font-size: 13.5px;
+    line-height: 1.5;
+}
+
+.alert-note {
+    background-color: var(--blue-tint);
+    border: 1px solid var(--blue);
+    color: var(--text-primary);
+}
+
+.alert-danger {
+    background-color: var(--danger-tint);
+    border: 1px solid var(--danger);
+    color: var(--text-primary);
+}
+
+/* --------------------------------------------------------------------------
+   Technical Breakdown Markdown Code Boxes
+   -------------------------------------------------------------------------- */
+.markdown-body {
+    font-size: 13.5px;
+    color: var(--text-secondary);
+    line-height: 1.65;
+}
+
+.markdown-body p {
+    margin-bottom: 12px;
+}
+
+.markdown-body strong {
+    color: var(--text-primary);
+}
+
+.markdown-body h4 {
+    font-family: var(--font-heading);
+    font-size: 14.5px;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin: 18px 0 10px 0;
+}
+
+.code-block-title {
+    font-family: var(--font-heading);
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 14px;
+    margin-bottom: 4px;
+}
+
+.code-snippet {
+    background-color: var(--bg-console);
+    color: #e3e3e3;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    overflow-x: auto;
+    line-height: 1.55;
+    margin-bottom: 14px;
+}
+
+.comparison-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+    margin: 12px 0 18px 0;
+}
+
+.comparison-table th {
+    background-color: var(--bg-app);
+    padding: 8px 10px;
+    font-family: var(--font-heading);
+    font-weight: 500;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+}
+
+.comparison-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+}
+
+/* --------------------------------------------------------------------------
+   Simulators: Pillar 2 Managed Sandbox (gVisor)
+   -------------------------------------------------------------------------- */
+.template-selector {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+
+.editor-container {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    background-color: var(--bg-console);
+}
+
+.editor-gutter {
+    background-color: #161718;
+    color: #5f6368;
+    padding: 12px 8px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    user-select: none;
+    text-align: right;
+    display: flex;
+    flex-direction: column;
+    line-height: 1.6;
+}
+
+.code-editor-textarea {
+    flex: 1;
+    background-color: transparent;
+    color: #aecbfa;
+    border: none;
+    padding: 12px 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+    resize: vertical;
+    min-height: 180px;
+    outline: none;
+}
+
+.sandbox-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.setting-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background-color: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    font-family: var(--font-heading);
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.setting-pill.active {
+    border-color: var(--blue-tint);
+}
+
+.dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+}
+
+.bg-success { background-color: var(--success); }
+.bg-danger { background-color: var(--danger); }
+
+.console-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: #161718;
+    padding: 8px 14px;
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+    border: 1px solid var(--border);
+    border-bottom: none;
+    font-family: var(--font-heading);
+    font-size: 11px;
+    font-weight: 500;
+    color: #c4c7c5;
+}
+
+.console-body {
+    background-color: var(--bg-console);
+    border: 1px solid var(--border);
+    border-radius: 0 0 var(--radius-md) var(--radius-md);
+    padding: 12px 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    min-height: 110px;
+}
+
+.console-line {
+    margin-bottom: 4px;
+}
+
+.syscall-table-container {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+}
+
+.syscall-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+}
+
+.syscall-table th {
+    background-color: var(--bg-app);
+    padding: 8px 10px;
+    text-align: left;
+    font-family: var(--font-heading);
+    font-weight: 500;
+    border-bottom: 1px solid var(--border);
+}
+
+.syscall-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+}
+
+/* --------------------------------------------------------------------------
+   Simulators: Pillar 3 Live Attack Playground & Policy Suite
+   -------------------------------------------------------------------------- */
+.attack-playground {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    margin-bottom: 24px;
+    box-shadow: var(--shadow-sm);
+}
+
+.playground-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.live-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background-color: var(--danger);
+    box-shadow: 0 0 8px var(--danger);
+}
+
+.playground-header h3 {
+    font-family: var(--font-heading);
+    font-size: 18px;
+    font-weight: 500;
+}
+
+.header-badge {
+    padding: 3px 10px;
+    border-radius: var(--radius-pill);
+    background-color: var(--danger-tint);
+    color: var(--danger);
+    font-family: var(--font-heading);
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.attack-input-wrap {
+    margin-bottom: 14px;
+}
+
+.attack-input {
+    width: 100%;
+    min-height: 85px;
+    padding: 12px 14px;
+    background-color: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    outline: none;
+    resize: vertical;
+}
+
+.attack-input:focus {
+    border-color: var(--blue);
+    box-shadow: 0 0 0 2px var(--blue-tint);
+}
+
+.attack-controls {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+}
+
+.attack-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 9px 18px;
+    background-color: var(--blue);
+    color: #ffffff;
+    border: none;
+    border-radius: var(--radius-pill);
+    font-family: var(--font-heading);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: var(--transition-fast);
+}
+
+.attack-btn:hover {
+    filter: brightness(1.08);
+}
+
+.attack-quick-btns {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.attack-quick-btns button {
+    padding: 6px 12px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border);
+    background-color: var(--bg-app);
+    color: var(--text-primary);
+    font-family: var(--font-heading);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: var(--transition-fast);
+}
+
+.attack-quick-btns button:hover {
+    border-color: var(--blue);
+    background-color: var(--blue-tint);
+}
+
+.attack-result-log {
+    margin-top: 18px;
+    background-color: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 16px;
+}
+
+.attack-result-log.hidden {
+    display: none;
+}
+
+.result-log-header {
+    font-family: var(--font-heading);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+}
+
+.rule-eval-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    margin-bottom: 6px;
+    opacity: 0;
+    transform: translateY(4px);
+    transition: all 0.25s ease;
+}
+
+.rule-eval-row.visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.rule-eval-row.triggered {
+    background-color: var(--danger-tint);
+    border: 1px solid var(--danger-tint);
+    color: var(--danger);
+}
+
+.rule-eval-row.clear {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+}
+
+.attack-verdict {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+    padding: 12px 16px;
+    border-radius: var(--radius-md);
+    font-family: var(--font-heading);
+    font-size: 14px;
+    font-weight: 500;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.attack-verdict.visible {
+    opacity: 1;
+}
+
+.attack-verdict.blocked {
+    background-color: var(--danger-tint);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+}
+
+.attack-verdict.allowed {
+    background-color: var(--success-tint);
+    border: 1px solid var(--success);
+    color: var(--success);
+}
+
+/* Policy Editor Card */
+.policy-rule-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.rule-card {
+    background-color: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 14px;
+}
+
+.rule-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    font-family: var(--font-heading);
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.toggle {
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+    font-size: 10px;
+    font-weight: 700;
+    background-color: var(--blue-tint);
+    color: var(--blue);
+}
+
+.policy-textarea {
+    width: 100%;
+    background-color: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    padding: 8px 10px;
+    font-family: var(--font-body);
+    font-size: 12.5px;
+    resize: vertical;
+    outline: none;
+}
+
+/* --------------------------------------------------------------------------
+   Deterministic Gateway Unit Test Suite Runner
+   -------------------------------------------------------------------------- */
+.test-harness-card {
+    border-color: var(--blue-tint);
+}
+
+.test-suite-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+    margin-top: 14px;
+}
+
+.test-case-item {
+    background-color: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    transition: var(--transition-fast);
+}
+
+.test-case-item:hover {
+    border-color: var(--blue);
+}
+
+.test-progress-bar {
+    height: 6px;
+    background-color: var(--bg-app);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-top: 16px;
+}
+
+.test-progress-bar .fill {
+    height: 100%;
+    background-color: var(--blue);
+    width: 0%;
+    transition: width 0.3s ease;
+}
+
+.test-report-card {
+    background-color: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 16px;
+}
+
+.report-header {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-heading);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+}
+
+.report-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+}
+
+.summary-item {
+    display: flex;
+    flex-direction: column;
+}
+
+.summary-item .label {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.summary-item .value {
+    font-family: var(--font-heading);
+    font-size: 18px;
+    font-weight: 500;
+}
+
+/* --------------------------------------------------------------------------
+   Modal for Custom Test Cases
+   -------------------------------------------------------------------------- */
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background-color: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    backdrop-filter: blur(4px);
+}
+
+.modal-content {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    width: 100%;
+    max-width: 520px;
+    padding: 24px;
+    box-shadow: var(--shadow-lg);
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 18px;
+}
+
+.modal-header h3 {
+    font-family: var(--font-heading);
+    font-size: 17px;
+    font-weight: 500;
+}
+
+.btn-close {
+    background: none;
+    border: none;
+    font-size: 22px;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 18px;
+}
+
+/* Footer */
+.app-footer {
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-muted);
+    font-family: var(--font-heading);
+}

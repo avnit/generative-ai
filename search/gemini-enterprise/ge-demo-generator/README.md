@@ -11,14 +11,14 @@ The **GE Demo Generator** is a low-code web application built on Google Apps Scr
 - **Reality-Grounded Demos**: The tool provisions actual BigQuery analytics, Google Maps grounding, and Firestore persistence databases for a raw, living demo experience.
 
 ### ⚙️ Technical Features
-- **Triple-Agent Autonomous Architecture**: Features a multi-agent execution framework powered by **Gemini 3.5 Flash** by default. Consists of a coordinator (`root_agent`) for chat, simple retrieval, and A2UI card rendering; an analytical sub-agent (`deep_analysis_agent`) for complex inline calculations; and a standalone background worker (`background_agent`) run asynchronously for long-running background tasks and recurring cron scheduled tasks. Models are configurable via `--model-analysis-agent` and `--model-root-agent` CLI flags.
+- **Triple-Agent Autonomous Architecture**: Features a multi-agent execution framework powered by **Gemini 3.6 Flash** by default. Consists of a coordinator (`root_agent`) for chat, simple retrieval, and A2UI card rendering; an analytical sub-agent (`deep_analysis_agent`) for complex inline calculations; and a standalone background worker (`background_agent`) run asynchronously for long-running background tasks and recurring cron scheduled tasks. Models are configurable via `--model-analysis-agent` and `--model-root-agent` CLI flags.
 - **Autonomous Workflow Pipelines & Guardrails**: Incorporates advanced background pipelines for both workflow-based operations (`SCAN -> ANALYZE -> PLAN -> EXECUTE -> VERIFY -> REPORT` with human-in-the-loop escalations) and deep analytical tasks. All background tasks are protected by an **Anti-Shallow Guard** self-check to ensure rigorous statistical results and extensive data tool coverage.
 - **MCP Server Catalog**: A curated catalog of pre-configured MCP servers (Government & Legal, Finance, Social, Japan-Specific, Environment & Weather, Google Official) with one-click add, recipe bundles, and custom URL import.
 - **A2UI (Agent-to-UI) Compliant**: Streams interactive Bento Grid layouts, Analytics Charts, and interactive confirmation cards using the A2UI SDK (`a2ui-agent-sdk`) via `<a2ui-json>` tags embedded in model responses. Integrates rich Welcome Card onboarding and step-by-step Workflow Execution Plan patterns.
 - **A2A Protocol Server**: The synthesized agent runs as a FastAPI-based A2A server on Cloud Run, compatible with Gemini Enterprise agent registration, and features a standalone `/execute_task` worker for background processing.
 - **Real-Time Persistence Layer**: The agent modifies Firestore via MCP, and a synthesized **Data Viewer** dashboard (Flask on Cloud Run Functions Gen2) watches Firestore collections and updates in real-time.
 - **Automated Cloud Run Deployment**: Containerized deployment to Cloud Run (with `--min-instances 0` to control standby costs) and automated Discovery Engine registration for Gemini Enterprise compatibility.
-- **Custom & Managed MCP Import**: Import third-party MCP servers from GitHub (bridged via `supergateway` stdio→StreamableHTTP) or integrate managed remote MCP servers (e.g., Slack with automated OAuth2 flow).
+- **Custom & Managed MCP Import**: Import third-party MCP servers from GitHub (bridged via `supergateway` stdio→StreamableHTTP), pick a managed remote server from the catalog (Slack, Notion), or paste **any** remote MCP URL (`https://mcp.yourservice.com/mcp`). The generator probes the endpoint, detects its auth mode from RFC 9728 / RFC 8414 metadata, and — where the server supports dynamic client registration (RFC 7591) — registers an OAuth client and runs the PKCE authorization for you, with no app to create by hand.
 - **Image Generation**: Built-in `generate_image` tool produces professional infographics and business summary visuals via `gemini-3.1-flash-image-preview`.
 - **Interactive Dashboards**: The agent can dynamically author and publish complete, interactive HTML dashboards (featuring responsive sorting tables, search filtering, Chart.js graphs, light/dark themes, and pure-JS tabs) via the `publish_dashboard` tool, hosted securely on Cloud Storage via signed URLs.
 - **Context Caching**: `ContextCacheConfig` aggressively caches system instructions and A2UI schemas to reduce time-to-first-token.
@@ -26,6 +26,8 @@ The **GE Demo Generator** is a low-code web application built on Google Apps Scr
 - **Managed Autonomous Agent (Antigravity)**: Optionally provisions a Pre-GA **Managed Agents API** agent (Antigravity harness) the demo agent can delegate long-horizon autonomous tasks to — live web research, code execution in a cloud sandbox, and professional deliverables (presentation decks, documents, PDFs, and web reports) crafted with mounted **SKILL.md** packs, with live progress streamed into the chat. Enabled by default; provisioning adds ~10 minutes (hidden behind the rest of the setup) and requires only the Vertex AI Agent Platform API — no allowlist.
 - **Workspace Authorization (No MCP)**: A lightweight alternative to Workspace MCP that adds Google sign-in for the demo user without any Developer-Preview allowlist. Combined with the Managed Agent, deliverables are saved to the user's Drive as native Google Slides / Docs / Sheets, and the autonomous agent acts on Gmail / Chat / Calendar via the open-source [Workspace CLI (gws)](https://github.com/googleworkspace/cli) inside its sandbox.
 - **Customer Domain Research**: Gemini-powered company research via Google Search grounding — automatically identifies business challenges and agent-automatable workflows from a customer's domain.
+- **Target Persona Selector**: Pick the demo's primary user (or describe a custom role) in the wizard — the selected persona becomes the protagonist of the generated scenario, demo guide, and agent instruction, keeping every step framed around that role's real workflow.
+- **Cross-Department Scenario Fabric**: Generated demos model realistic organizational hand-offs — records carry `current_department` / `next_department` fields plus an append-only audit-trail history, the agent narrates department-boundary transitions, and the Data Viewer surfaces the process stage as a badge. Quantitative grounding derived from domain research keeps the synthetic numbers business-plausible, and a coverage self-check warns when the demo guide fails to showcase a requested capability. Disable everything at once with the `DISABLE_CROSSORG_PACK` Script Property.
 - **Model Transparency**: Real-time model name announcement in the streaming response accordion for runtime visibility.
 - **Premium Live Architecture Dashboard**: Displays a high-fidelity interactive target architecture diagram SVG during the synthesis step with active pulsing and success glowing states across BigQuery, Gemini Agent, and Cloud Run nodes. Features an animated Dynamic Tips Carousel rotating every 12 seconds, a real-time Elapsed Timer, and an Automatic Retry Mechanism (up to 2 retries) for Apps Script generation robustness.
 
@@ -39,9 +41,9 @@ The **GE Demo Generator** is a low-code web application built on Google Apps Scr
 - [3. Apps Script Project Setup](#3-apps-script-project-setup)
 - [4. Deploying Code to Apps Script](#4-deploying-code-to-apps-script)
 - [5. Google Cloud Project Setup](#5-google-cloud-project-setup)
-- [6. Script Properties (Zero Hardcoding)](#6-script-properties-zero-hardcoding)
-- [7. Manual API Authorization (Required Once)](#7-manual-api-authorization-required-once)
-- [8. Prepare the Usage Log Spreadsheet](#8-prepare-the-usage-log-spreadsheet)
+- [6. Prepare the Usage Log Spreadsheet](#6-prepare-the-usage-log-spreadsheet)
+- [7. Script Properties (Zero Hardcoding)](#7-script-properties-zero-hardcoding)
+- [8. Manual API Authorization (Required Once)](#8-manual-api-authorization-required-once)
 - [9. Web App Deployment](#9-web-app-deployment)
 - [10. How the Generated Demo Works](#10-how-the-generated-demo-works)
 - [11. Project Structure](#11-project-structure)
@@ -168,11 +170,27 @@ These are already declared in `appsscript.json` and will be auto-enabled when th
 
 ---
 
-## 6. Script Properties (Zero Hardcoding)
+## 6. Prepare the Usage Log Spreadsheet
+
+1. Create a new Google Spreadsheet (or use an existing one).
+2. Create a sheet named **`Usage_Logs`** with the following header row:
+
+   | Timestamp | User Email | User Goal | AI Summary | Dataset ID | MCP Servers | Generation Time (s) |
+   |---|---|---|---|---|---|---|
+
+   > **Note**: The headers are automatically synced on each log write by `ensureLogSheetHeaders()`. You only need to create the sheet — the function will overwrite row 1 with the correct headers.
+
+3. Copy the spreadsheet URL — you will set it as the `LOG_SHEET_URL` Script Property in the next section.
+
+---
+
+## 7. Script Properties (Zero Hardcoding)
 
 This codebase contains **no hardcoded parameters**. All configuration is managed via **Script Properties**.
 
-### 6.1 Mandatory Properties
+A complete setup is **two properties**: `PROJECT_ID` and `LOG_SHEET_URL`. Everything in §7.2 has a working default and should be left unset.
+
+### 7.1 Mandatory Properties
 
 | Property | Description |
 |---|---|
@@ -181,22 +199,46 @@ This codebase contains **no hardcoded parameters**. All configuration is managed
 
 > **Important**: Both properties are checked at startup. If any are missing, the app displays a `SetupError.html` page with instructions instead of the main UI.
 
-### 6.2 Optional Properties
+### 7.2 Optional Properties
+
+**You do not need to set any of these.** Every property below has a working default, and leaving it unset is the supported configuration — it is what a normal deployment looks like. Set one only when you specifically want the behaviour it describes, and remove it again once you no longer do.
+
+**Tuning** — occasionally useful in a normal deployment:
 
 | Property | Default | Description |
 |---|---|---|
 | `LOCATION` | `global` | Vertex AI Agent Platform API location (e.g., `us-central1`, `global`) |
-| `MODEL` | `gemini-3.5-flash` | Gemini model name for data generation |
-| `TEMPLATE_REPO` | this repository | Git URL the generated setup script fetches `agent_template/` from at run time |
-| `TEMPLATE_REF` | pinned commit SHA in `Code.gs` | Commit SHA (or tag) of the agent template to fetch. Update whenever `agent_template/` changes so generated scripts keep fetching the files they were built for |
+| `MODEL` | `gemini-3.6-flash` | Gemini model name for data generation |
+| `GITHUB_TOKEN` | (unset) | GitHub personal access token used for GitHub API calls when importing custom MCP servers from a repository URL. Only needed for private repos or to avoid unauthenticated rate limits |
+
+**Development and administration** — for working on this sample, not for running it. If you are deploying the app to give demos, skip these entirely:
+
+| Property | Default | Description |
+|---|---|---|
+| `TEMPLATE_REPO` | this repository | Git **clone** URL (ending in `.git`) the generated setup script fetches `agent_template/` from at run time — see the note below |
+| `TEMPLATE_REF` | `main` | Branch, tag, or commit SHA of the agent template. A branch/tag is resolved to a concrete commit SHA at script-generation time (each generated script is pinned to that SHA); set a 40-hex SHA to hard-pin |
 | `TEMPLATE_SUBDIR` | `search/gemini-enterprise/ge-demo-generator/agent_template` | Repo path of the template directory |
+| `DISABLE_CROSSORG_PACK` | (unset) | Set to `1` to disable every cross-departmental prompt insertion (persona anchor, cross-department scenario fabric, process-state rules) at once — an admin rollback lever, not a user-facing option |
 
 > **Note**: The three `TEMPLATE_*` properties override the defaults baked into
 > `Code.gs`. Setting them lets a deployed app switch template sources (for
 > example to a fork during development, or to this repository's latest release
 > commit) without redeploying the Apps Script code.
 
-### 6.3 Setting Properties
+`TEMPLATE_REPO` is a git **clone** URL — the string you would hand to
+`git clone`, ending in `.git`. Browsing to `agent_template/` on github.com
+gives you a different kind of URL: it contains `/tree/`, it already includes
+the path that belongs in `TEMPLATE_SUBDIR`, and git cannot fetch from it. An
+app configured that way still generates scripts, but they fail with
+`repository ... not found` for whoever runs them. A complete, correct set:
+
+```text
+TEMPLATE_REPO    https://github.com/GoogleCloudPlatform/generative-ai.git
+TEMPLATE_REF     main
+TEMPLATE_SUBDIR  search/gemini-enterprise/ge-demo-generator/agent_template
+```
+
+### 7.3 Setting Properties
 
 **Option A: Via Script Editor (Recommended for first-time setup)**
 
@@ -216,7 +258,7 @@ This codebase contains **no hardcoded parameters**. All configuration is managed
 
 ---
 
-## 7. Manual API Authorization (Required Once)
+## 8. Manual API Authorization (Required Once)
 
 Even with correct scopes in `appsscript.json`, you **must** manually authorize the script to access your data.
 
@@ -226,20 +268,6 @@ Even with correct scopes in `appsscript.json`, you **must** manually authorize t
    - You may need to click **"Advanced" → "Go to [project name] (unsafe)"** if prompted with an "unverified app" warning.
 
 > **Note**: The `forceAuthorizeSpreadsheet` function explicitly triggers authorization for Spreadsheet scopes by performing a safe read test.
-
----
-
-## 8. Prepare the Usage Log Spreadsheet
-
-1. Create a new Google Spreadsheet (or use an existing one).
-2. Create a sheet named **`Usage_Logs`** with the following header row:
-
-   | Timestamp | User Email | User Goal | AI Summary | Dataset ID | MCP Servers | Generation Time (s) |
-   |---|---|---|---|---|---|---|
-
-   > **Note**: The headers are automatically synced on each log write by `ensureLogSheetHeaders()`. You only need to create the sheet — the function will overwrite row 1 with the correct headers.
-
-3. Copy the spreadsheet URL and set it as the `LOG_SHEET_URL` Script Property.
 
 ---
 
@@ -267,7 +295,7 @@ When a user generates a demo through the web UI, the tool:
    - Provisions Firestore with operational documents
    - Deploys a **Data Viewer** web app (Flask on Cloud Run Functions Gen2)
    - Scaffolds an ADK agent project with MCP toolsets, A2UI support, and an A2A FastAPI server exposing a chat agent (`root_agent` and `deep_analysis_agent` sub-agent) and a background worker (`background_agent` via `/execute_task` runner)
-   - Defaults to **Gemini 3.5 Flash** for all three agents, with support for model override via `--model-analysis-agent` and `--model-root-agent` CLI flags
+   - Defaults to **Gemini 3.6 Flash** for all three agents, with support for model override via `--model-analysis-agent` and `--model-root-agent` CLI flags
    - Automatically builds a container image and deploys the Agent FastAPI server to **Cloud Run** (with `--min-instances 0` to control standby costs).
    - Provisions IAM bindings and environment configurations automatically.
    - Discovers any existing Gemini Enterprise Apps in your project and registers the newly deployed Cloud Run agent automatically.
@@ -298,7 +326,10 @@ ge-demo-generator/
 ├── AGENTS.md                # AI agent development guide
 ├── deploy.sh                # Clasp deployment orchestrator script
 ├── validate_examples.py     # Validates agent_template JSON + Python files
-├── gebe-demo-generator/     # (Subproject) Drive/Docs provisioning engine
+├── check_deps.py            # Audits the PINNED_DEPS major caps (AGENTS.md 8)
+├── ge-demo-generator-lite/  # (Subproject) GE Demo Generator Lite — Workspace
+│                            #  demo-data generator for Gemini Enterprise
+│                            #  editions without custom-agent support
 │   ├── appsscript.json
 │   ├── Code.gs
 │   ├── index.html
@@ -324,8 +355,9 @@ This removes:
 - Firestore collection documents
 - Dashboards Google Cloud Storage (GCS) Bucket (and all uploaded dashboard HTML snapshots)
 - Gemini Enterprise agent registration & authorization resource
-- Secret Manager secrets (for custom MCP and Slack OAuth tokens)
+- Secret Manager secrets (for custom MCP, Slack, and remote MCP OAuth tokens)
 - Slack App notification (manual deletion at api.slack.com required)
+- Remote MCP notification (dynamically registered OAuth clients cannot be deleted via API; revoke access in the vendor's connected-apps settings)
 - Local directories and uv caches
 
 ---
@@ -442,6 +474,19 @@ If sub-agents fail to modify Firestore or pull from BigQuery:
   - `roles/bigquery.dataViewer` & `roles/bigquery.jobUser`
   - `roles/aiplatform.user`
  
+#### 6. Setup Appears to Hang at "Deploying Main Agent to Cloud Run via Source"
+If the deploy step never returns, the container is almost certainly crashing at import and Cloud Run is retrying the startup probe forever — which produces no obvious error in the script output.
+- **Cause**: a dependency changed its module layout in a new release. Every pip requirement is capped at the next major in `PINNED_DEPS` (`app/Code.gs`) precisely to prevent this, but a package can still break within a major.
+- **Detection**: the Docker build runs `dep_smoke_test.py`, which resolves every third-party module and symbol the generated code imports and **fails the build** naming the offending one. Check the Cloud Build log for `FAIL: dependency import smoke test`; the `uv pip freeze` output printed just above it shows the versions actually installed.
+- **Fix**: cap the offending package below the breaking release in `PINNED_DEPS` and re-run. `python3 check_deps.py` shows the current floor / cap / resolved / latest for every requirement. Note that a cap belongs below the last version that is known to *work*, which is not always the newest one the resolver can reach -- `a2a-sdk` is held at `<0.4.0` for exactly this reason.
+- **Imported MCP servers**: cloned MCP server repos install their own dependencies into the same image. The build passes them a generated `constraints.txt` so a third-party requirement cannot upgrade past these caps. If such an install fails — including because it demands a version the caps forbid — the **build now stops and prints the reason**. It used to succeed quietly and produce an image whose MCP sidecar started but could not serve a tool call.
+ 
+#### 7. Endless "The agent requires additional authorization" Prompt
+If every message comes back with the Gemini Enterprise authorization card, you complete consent, and the very next turn asks again — with no error anywhere in the UI, in Cloud Run, or in the agent logs:
+- **Cause**: Consent only validates the `client_id` and the redirect URI, so it succeeds even when the code-to-token exchange that Gemini Enterprise performs afterwards fails. The usual reason is a stored OAuth client secret that no longer matches the client (rotated or deleted). Because every demo in a project shares one OAuth client, this breaks **all** Workspace-authorization demos at once.
+- **Detection**: The setup script now probes the token endpoint with a throwaway code before wiring the credentials into Gemini Enterprise. `invalid_grant` means the credentials are good (only the fake code was rejected); `invalid_client` means the secret is stale.
+- **Fix**: Add a **new secret to the existing OAuth client** (the `client_id` and redirect URI stay valid) at `https://console.cloud.google.com/auth/clients`, then re-run the setup script — it prompts for the new secret, verifies it, stores it as a new Secret Manager version, and refreshes the authorization resource.
+ 
 ---
  
 ### 13.3 Cleanup
@@ -451,7 +496,23 @@ When you are done with the demo, see [Section 12: Cleanup](#12-cleanup) for inst
 ---
  
 ### Need Help?
-Refer to the sections above for comprehensive documentation, system architecture, and the developer guide.
+
+The sections above cover the documentation, the system architecture, and the developer guide. If they do not answer your question, use the table below.
+
+**Before you report a failing setup script:** the script prints the underlying error immediately _above_ the ❌ summary line. Those lines usually identify the cause on their own, so always include them.
+
+| What you need | Where to go |
+| --- | --- |
+| A bug or a question about **this sample** | [Open an issue](https://github.com/GoogleCloudPlatform/generative-ai/issues/new?template=bug-report.yml) in this repository. Enter `AGENTS.md` in the **File Name** field so the issue is routed to the owner of this sample automatically, and prefix the title with `[ge-demo-generator]`. |
+| A **Google Cloud product** problem (Gemini Enterprise, Cloud Run, BigQuery) | [Google Cloud Support](https://cloud.google.com/support). If you have a support contract, this is faster than GitHub. |
+| An **Agent Platform API** defect | [Google Issue Tracker](https://issuetracker.google.com/issues/new?component=1130925) |
+
+When you open an issue, please include:
+
+- the `Version:` line printed at the end of the setup script (for example, `v11.45-public`)
+- the agent-template ref the script printed (`📥 Fetching agent template (ref ...)`)
+- the output of `git --version`
+- whether you ran the script in **Cloud Shell**, which is the supported environment for the setup script
 
 ---
 
@@ -505,7 +566,7 @@ A monolithic Google Apps Script file (~17.7k lines, ~952 KB) that contains:
 | **Favorites & Deletion** | `toggleFavorite`, `deleteHistoryItem` | Per-user favorites and owner-only history deletion |
 | **Vertex AI Agent Platform Utilities** | `callVertexAI`, `callVertexAIWithSearch`, `executeWithRetry` | API calls with retry logic and Google Search grounding |
 | **Customer Domain Research** | `researchCompanyByDomain`, `mergeTemplateWithCompanyInfo` | Google Search-grounded company research, challenge identification, and workflow discovery |
-| **MCP Import & Analysis** | `analyzeMcpRepository` | Analyzes GitHub repos via `gemini-3.1-flash-lite` and integrates custom MCP servers as co-located sidecars in the agent container |
+| **MCP Import & Analysis** | `analyzeMcpRepository` | Analyzes GitHub repos via `gemini-3.5-flash-lite` and integrates custom MCP servers as co-located sidecars in the agent container |
 
 #### Error Handling (`SetupError.html`)
 
@@ -539,12 +600,12 @@ When the user runs the generated setup script in Cloud Shell, the following arch
 
 #### Agent Architecture
 
-The synthesized agent uses a **triple-agent/multi-agent autonomous execution** architecture to achieve high-depth operational execution alongside optimal latency and cost. The architecture features three specialized agent instances, all utilizing **Gemini 3.5 Flash** by default for rapid response and high token efficiency:
+The synthesized agent uses a **triple-agent/multi-agent autonomous execution** architecture to achieve high-depth operational execution alongside optimal latency and cost. The architecture features three specialized agent instances, all utilizing **Gemini 3.6 Flash** by default for rapid response and high token efficiency:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  root_agent (LlmAgent — Coordinator)                         │
-│  Model: gemini-3.5-flash (AGENT_MODEL_LITE)                  │
+│  Model: gemini-3.6-flash (AGENT_MODEL_LITE)                  │
 │  Role: Chat coordinator, simple queries, A2UI card builder    │
 │  Instruction: Generated system prompt + A2UI schema          │
 │               + Background-First Routing Rules               │
@@ -560,7 +621,7 @@ The synthesized agent uses a **triple-agent/multi-agent autonomous execution** a
 │                                                              │
 │  ┌──────────────────────────────────────────────────────┐    │
 │  │  deep_analysis_agent (LlmAgent — Analytical Sub)     │    │
-│  │  Model: gemini-3.5-flash (AGENT_MODEL)                │    │
+│  │  Model: gemini-3.6-flash (AGENT_MODEL)                │    │
 │  │  Role: Complex inline multi-step reasoning            │    │
 │  │  Tools: Same shared toolset                           │    │
 │  │  Transfer: Returns to root_agent on completion        │    │
@@ -574,7 +635,7 @@ The synthesized agent uses a **triple-agent/multi-agent autonomous execution** a
 
 ┌──────────────────────────────────────────────────────────────┐
 │  background_agent (LlmAgent — Standalone Worker)              │
-│  Model: gemini-3.5-flash (AGENT_MODEL)                       │
+│  Model: gemini-3.6-flash (AGENT_MODEL)                       │
 │  Role: Autonomous background operations & deep analysis       │
 │  Instruction: Main instruction + Pipeline guardrails         │
 │               + Anti-Shallow Guard (no UI / no transfers)    │
@@ -671,6 +732,7 @@ The frontend includes a curated MCP catalog with servers organized into categori
 | **Government & Legal** | US Government Open Data, US Legal & Legislation |
 | **Finance & Markets** | Yahoo Finance |
 | **Social & Communication** | LINE Bot, Slack (managed remote) |
+| **Productivity** | Notion (managed remote, OAuth via dynamic client registration) |
 | **Japan-Specific** | MLIT Data Platform, Japanese Tax Law, Japanese Labor Law, National Diet Proceedings |
 | **Environment & Weather** | Weather Data |
 | **Google Official** | Google Workspace MCP (Gmail, Drive, Calendar, People) |
@@ -683,15 +745,38 @@ The catalog also includes **recipe bundles** — pre-configured combinations of 
 |---|---|---|
 | **Sidecar (GitHub)** | `supergateway` stdio→StreamableHTTP (`--sessionStateless`) | Cloned into Docker image, bridged via `supergateway` on a per-port basis |
 | **Remote Managed (Slack)** | StreamableHTTP direct | OAuth2 flow during setup; token stored in Secret Manager |
+| **Remote Managed (generic)** | StreamableHTTP direct | Auth mode probed at import time; credentials stored as one JSON blob per server in Secret Manager and refreshed at run time |
 | **Google Workspace** | StreamableHTTP direct | MCP OAuth with token passthrough from Gemini Enterprise |
 
-#### Custom MCP Import (URL)
+#### Custom MCP Import (GitHub URL)
 
 Users can import any GitHub-hosted MCP server by providing the repository URL. The system:
-1. Fetches repository contents via Gemini-powered analysis (`gemini-3.1-flash-lite`)
+1. Fetches repository contents via Gemini-powered analysis (`gemini-3.5-flash-lite`)
 2. Identifies the entrypoint, language, required environment variables, and capabilities
 3. Generates the Dockerfile sidecar configuration and `supergateway` bridge commands
 4. Supports deduplication to prevent adding the same server twice
+
+#### Remote MCP Import (endpoint URL)
+
+Users can also paste the URL of any managed remote MCP server (for example
+`https://mcp.notion.com/mcp`). The generator probes the endpoint and derives the
+auth mode from the protocol itself, rather than from a hardcoded per-vendor list:
+
+| Detected `auth_type` | How it is detected | What setup does |
+|---|---|---|
+| `none` | an unauthenticated `initialize` succeeds | nothing — the server is called directly |
+| `oauth2_dcr` | RFC 9728 / RFC 8414 metadata advertises a `registration_endpoint` | registers an OAuth client (RFC 7591) and runs the PKCE authorization (RFC 7636) during setup |
+| `oauth2_manual` | OAuth metadata, but no dynamic registration | prompts for a client ID/secret you created yourself, then runs PKCE |
+| `bearer_token` | a credential is required, but no OAuth metadata is published | prompts for a long-lived token |
+
+Each server gets one Secret Manager secret holding a single JSON blob
+(`access_token`, `refresh_token`, `client_id`, `client_secret`, `token_endpoint`,
+`resource`, `expires_in`, `issued_at`), bound to one `RMCP_<SERVER>_AUTH`
+environment variable. At run time the agent refreshes the access token shortly
+before it expires and writes rotated refresh tokens back as a new secret version.
+Authorization is optional at deploy time: if you skip it, the demo still deploys
+and the agent simply starts without that toolset. Tool names are prefixed per
+server, so several remote servers can be attached without colliding.
 
 ---
 
@@ -764,11 +849,11 @@ graph TD
 The setup script deploys the agent directly to Google Cloud Run and supports model overrides and automated cleanup via CLI flags:
 
 ```bash
-# Default models (gemini-3.5-flash)
+# Default models (gemini-3.6-flash)
 bash setup-demo-xxx.sh
 
 # Override models
-bash setup-demo-xxx.sh --model-analysis-agent gemini-3.1-pro-preview --model-root-agent gemini-3.1-flash-lite
+bash setup-demo-xxx.sh --model-analysis-agent gemini-3.1-pro-preview --model-root-agent gemini-3.5-flash-lite
 
 # Cleanup
 bash setup-demo-xxx.sh --cleanup
@@ -838,7 +923,7 @@ After running the setup script, the following directory structure is created:
 
 1. **Prompt**: The user says in Gemini Enterprise: *"Approve safety issue #104 and log update notes."*
 2. **A2A Routing**: Gemini Enterprise sends the message via A2A JSON-RPC to the Cloud Run FastAPI server.
-3. **Model Announcement**: The server emits a `🧠 Model: gemini-3.5-flash` status event in the thinking accordion.
+3. **Model Announcement**: The server emits a `🧠 Model: gemini-3.6-flash` status event in the thinking accordion.
 4. **Reasoning**: The `root_agent` identifies a write request and plans to use the Firestore MCP toolset.
 5. **Confirmation**: The agent renders an A2UI confirmation card (via `<a2ui-json>` tags) showing before/after data with Approve/Reject buttons and a `dataModelUpdate` for pre-populated fields.
 6. **User Approval**: The user clicks "Approve" in the interactive card, which sends a `sendText` action back to the agent.
@@ -870,7 +955,7 @@ After running the setup script, the following directory structure is created:
 - **Ingress Org-Policy Graceful Failure**: Setup scripts detect and gracefully handle organization policies that block unauthenticated Cloud Run endpoints (e.g., `constraints/iam.allowedPolicyMemberDomains`).
 - **Static Agent Card**: The A2A server builds an `AgentCard` without connecting to MCP servers at startup, preventing hangs from slow/broken MCP connections. MCP tool connections happen lazily on first user request.
 - **Parallel BQ Loading**: BigQuery table loading uses `xargs -P 5` for parallel CSV uploads.
-- **Min Instances**: Cloud Run deployments use `--min-instances 0` to minimize standby costs for demo environments (users should expect occasional cold-start latency on the first request).
+- **Scale to Zero**: Cloud Run deployments use `--min-instances 0 --max-instances 1` so an idle demo costs nothing between conversations. Three mechanisms make that safe: background runs are dispatched through a **Cloud Tasks** queue (so they survive the turn that started them, retry if the instance is recycled, and wake a cold service), ADK sessions are mirrored to Firestore and rehydrated on a cold start, and a worker heartbeat plus an abandoned-run sweep finalize anything that dies with its instance. The cost is a cold start on the first message after an idle gap (measured: ~+25s on that one message). Export `MIN_INSTANCES=1` before running the setup script to keep a warm instance for a live presentation.
 - **Supergateway Stateless Sessions**: Custom MCP sidecars use `supergateway --sessionStateless` to prevent process accumulation from multiple client connections.
 
 ### Token Management

@@ -21,7 +21,7 @@
  *
  * ── What Gets Generated ──────────────────────────────────────────────
  *   • Synthetic business data (BigQuery tables + optional Firestore docs)
- *   • Dual-model ADK agent (Gemini 3.1 Flash-Lite root → Pro analysis)
+ *   • Dual-model ADK agent (Gemini 3.5 Flash-Lite root → Pro analysis)
  *   • MCP toolsets — BigQuery, Maps, Firestore, Google Workspace (Gmail,
  *     Drive, Calendar, Chat, People), plus arbitrary GitHub MCP servers
  *   • A2A (Agent-to-Agent) server with A2UI interactive components
@@ -74,22 +74,45 @@ function forceAuthorize() {
   return '✅ Authorization verified. Refresh the browser and try generating a demo!';
 }
 
+/**
+ * Reduces a GitHub URL to the clone URL that git can actually fetch from.
+ *
+ * TEMPLATE_REPO is set by hand in the Script Properties, and the URL a person
+ * has on screen at that moment is the browse URL of the template directory
+ * (https://github.com/OWNER/REPO/tree/main/path/to/agent_template). That is not
+ * a git remote: the fetch in the generated setup script dies with "repository
+ * not found" long after generation, on someone else's machine. Everything after
+ * OWNER/REPO is dropped so both forms work. Non-GitHub and SSH remotes are
+ * returned untouched.
+ */
+function normalizeGitRemoteUrl_(url) {
+  if (!url) return url;
+  const trimmed = String(url).trim();
+  const match = trimmed.match(
+    /^https?:\/\/(?:www\.)?github\.com\/([^\/\s]+)\/([^\/\s#?]+?)(?:\.git)?(?:[\/#?].*)?$/i);
+  return match ? 'https://github.com/' + match[1] + '/' + match[2] + '.git' : trimmed;
+}
+
 const SCRIPT_PROPS = PropertiesService.getScriptProperties();
 const CONFIG = {
   PROJECT_ID: SCRIPT_PROPS.getProperty('PROJECT_ID'),
   LOCATION: SCRIPT_PROPS.getProperty('LOCATION') || 'global',
-  MODEL: SCRIPT_PROPS.getProperty('MODEL') || 'gemini-3.5-flash',
+  MODEL: SCRIPT_PROPS.getProperty('MODEL') || 'gemini-3.6-flash',
   GITHUB_TOKEN: SCRIPT_PROPS.getProperty('GITHUB_TOKEN'),
   MAX_RETRIES: 3,
   RETRY_DELAY_MS: 1000,
-  APP_VERSION: 'v11.5-public',
+  APP_VERSION: 'v11.56-public',
   // Agent-template source: the generated setup script fetches the static
-  // Python/JSON template files (agent_template/ in the repo) from this
-  // repo at this pinned ref at run time. Pin to a commit SHA so every
-  // generated script keeps fetching exactly the files it was built for.
-  // Override via Script Properties (TEMPLATE_REPO / TEMPLATE_REF) for testing.
-  TEMPLATE_REPO: SCRIPT_PROPS.getProperty('TEMPLATE_REPO') || 'https://github.com/GoogleCloudPlatform/generative-ai.git',
-  TEMPLATE_REF: SCRIPT_PROPS.getProperty('TEMPLATE_REF') || '49f0bddb7c1e2b0b90cee7643c5eb961d33adf92',
+  // Python/JSON template files (agent_template/ in the repo) at run time.
+  // TEMPLATE_REF may be a branch name (default 'main'): it is resolved to a
+  // concrete commit SHA at script-GENERATION time and that SHA is baked into
+  // each generated script, so scripts stay reproducible without this file
+  // ever committing its own merge SHA. Set the TEMPLATE_REF Script Property
+  // to a 40-hex SHA to hard-pin, or point TEMPLATE_REPO/TEMPLATE_REF at a
+  // fork/branch for pre-merge testing. TEMPLATE_REPO is normalized to a clone
+  // URL so that pasting a GitHub browse URL still produces a working script.
+  TEMPLATE_REPO: normalizeGitRemoteUrl_(SCRIPT_PROPS.getProperty('TEMPLATE_REPO')) || 'https://github.com/GoogleCloudPlatform/generative-ai.git',
+  TEMPLATE_REF: SCRIPT_PROPS.getProperty('TEMPLATE_REF') || 'main',
   TEMPLATE_SUBDIR: SCRIPT_PROPS.getProperty('TEMPLATE_SUBDIR') || 'search/gemini-enterprise/ge-demo-generator/agent_template',
   LOG_SHEET_URL: SCRIPT_PROPS.getProperty('LOG_SHEET_URL')
 };
@@ -153,7 +176,7 @@ function doGet() {
 
   template.projectId = CONFIG.PROJECT_ID;
   template.userEmail = Session.getActiveUser().getEmail();
-  template.generatorModel = CONFIG.MODEL || 'gemini-3.5-flash';
+  template.generatorModel = CONFIG.MODEL || 'gemini-3.6-flash';
   
   return template.evaluate()
     .setTitle('GE Demo Generator')
@@ -335,7 +358,7 @@ function initializeProject(projectId, logSheetUrl) {
   const newProps = {
     PROJECT_ID: projectId, 
     LOCATION: currentProps.LOCATION || 'global',
-    MODEL: currentProps.MODEL || 'gemini-3.5-flash',
+    MODEL: currentProps.MODEL || 'gemini-3.6-flash',
     LOG_SHEET_URL: logSheetUrl || currentProps.LOG_SHEET_URL || ''
   };
   
@@ -563,6 +586,11 @@ function generateDemo(userGoal, options = {}) {
     
     result.datasetId = datasetId;
     result.userGoal = userGoal;
+    // Persisted into the Drive backup so eval tooling and restores can see the
+    // selected Target Persona (the history entry alone is not backed up).
+    result.targetPersona = options.targetPersona || null;
+    result.targetPersonaDesc = options.targetPersonaDesc || null;
+    result.quantFacts = options.quantFacts || null;
     result.dataPreview = planResult.dataPreview;
     result.rawTables = planResult.tables;
     result.suffix = suffix;
@@ -578,9 +606,26 @@ function generateDemo(userGoal, options = {}) {
     result.appliedFactors = planResult.appliedFactors || {};
     result.agentShortName = planResult.agentShortName || '';
     result.oneSentenceSummary = planResult.oneSentenceSummary || '';
+    result.operatingModel = planResult.operatingModel || null;
     result.firestore = planResult.firestore || null;
     result.importedMcpList = options.importedMcpList || null;
     result.metadata = planResult.metadata || null;
+    // M2 (v11.16): capability-coverage check (warns only, never blocks).
+    // Detects a capability mandate that the demo guide silently dropped.
+    try {
+      const _guideStr = JSON.stringify(planResult.demoGuide || []).toLowerCase();
+      const _covWarnings = [];
+      if (options.enableWorkspaceMcp && !/(mail|メール|drive|ドライブ|calendar|カレンダー|chat|チャット)/.test(_guideStr)) _covWarnings.push('Workspace MCP');
+      if (options.enableComputerUse && !/(http|browser|ブラウザ|website|サイト|web)/.test(_guideStr)) _covWarnings.push('Computer Use');
+      if (options.enableManagedAgent && !/(資料|デッキ|deck|report|レポート|presentation|プレゼン|調査|research)/.test(_guideStr)) _covWarnings.push('Managed Agent');
+      const _files = planResult.externalFiles || [];
+      if (!_files.some(f => /\.pdf$/i.test(f.fileName || ''))) _covWarnings.push('PDF asset (planning mandates exactly one)');
+      if (!_files.some(f => /\.xlsx$/i.test(f.fileName || ''))) _covWarnings.push('Excel asset (planning mandates exactly one)');
+      if (_covWarnings.length) {
+        console.warn('[COVERAGE] demoGuide may not showcase: ' + _covWarnings.join(', '));
+        result.coverageWarnings = _covWarnings;
+      }
+    } catch (covErr) { /* best-effort only */ }
     // Persist feature flags so the Drive-backup restore path (see the
     // generateSetupScript regeneration block) can rebuild the same script.
     result.enableWorkspaceMcp = options.enableWorkspaceMcp || false;
@@ -601,6 +646,7 @@ function generateDemo(userGoal, options = {}) {
       userGoal: userGoal,
       agentShortName: planResult.agentShortName,
       oneSentenceSummary: planResult.oneSentenceSummary,
+      operatingModel: planResult.operatingModel,
       importedMcpList: options.importedMcpList,
       enableWorkspaceMcp: options.enableWorkspaceMcp,
       enableComputerUse: options.enableComputerUse,
@@ -643,6 +689,8 @@ function generateDemo(userGoal, options = {}) {
       industry: taxonomy.industry,
       persona: taxonomy.persona,
       useCase: taxonomy.useCase,
+      targetPersona: options.targetPersona || null,
+      result: result
     };
 
     try {
@@ -819,13 +867,29 @@ function planAndGenerateData(userGoal, options) {
     - You MUST leverage this capability when generating the 'businessInstruction' and 'demoGuide' (prompts).
     - In 'businessInstruction', mention that the agent can hand off deep autonomous work (research, building deliverables, iterative code work) to a managed autonomous agent and deliver finished files back to the user.
     - You MUST design at least TWO prompts (out of the 7 required) in the 'demoGuide' that showcase the autonomous agent, following BOTH patterns below:
-      - **Pattern A (WEB RESEARCH + INTERNAL DATA SYNTHESIS)**: one prompt MUST require researching CURRENT external information on the public web (industry trends, competitor moves, market prices, regulations) AND combining it with the demo's own BigQuery data into a substantial written analysis. Phrase it so the answer is impossible without live web research (e.g. "Research the latest <industry> trends online and produce a competitive analysis against our own sales data").
-      - **Pattern B (COMPLEX LONG-HORIZON DELIVERABLE)**: one prompt MUST ask for finished, downloadable business output whose production requires SEQUENTIALLY DEPENDENT phases (real quantitative analysis of the internal data -> charts built from that analysis -> professional assembly), so the request genuinely deserves tens of minutes of autonomous work. Make it one of these two shapes, whichever fits the scenario better: (1) TWO complementary formats built from the same analysis - e.g. a board presentation deck PLUS a 2-page summary PDF for the field team, or a formal proposal document PLUS a one-page web briefing; or (2) a WORKING INTERACTIVE TOOL - a self-contained web app the user opens in a browser (e.g. a pricing / capacity / what-if simulator) whose coefficients come from the actual data analysis, plus a short document explaining the model. The prompt should sound like a real executive request and SHOULD state 1-2 explicit quality conditions in natural business language (e.g. "lead with the conclusion on the first page", "every number must be sourced from our data or a cited reference") - these conditions make the agent's self-review-and-rebuild loop visible in the demo. Patterns A and B MUST use DIFFERENT deliverable formats so the demo shows variety.${ (options.enableWorkspaceMcp || options.enableWorkspaceAuth) ? `
+      - **Pattern A (WEB RESEARCH + INTERNAL DATA SYNTHESIS)**: one prompt MUST require researching CURRENT external information on the public web (industry trends, competitor moves, market prices, regulations) AND combining it with the demo's own BigQuery data into a substantial written analysis. Phrase it so the answer is impossible without live web research (e.g. "Research the latest <industry> trends online and produce a competitive analysis against our own sales data").${ options.enableComputerUse ? ` Because the browser agent is ALSO enabled, Pattern A MUST name ONE specific external page or portal to check interactively (e.g. a competitor's public pricing page or an official statistics portal) AND phrase that part as an explicit browse request (e.g. "browse <site> live for the latest ..."), so the assistant operates its real browser live in the chat BEFORE handing off to the autonomous agent - a strong combined showcase. Keep it to a single, quickly checkable page; the deep multi-source research still belongs to the autonomous agent.` : ''}
+      - **Pattern B (COMPLEX LONG-HORIZON DELIVERABLE)**: one prompt MUST ask for finished, downloadable business output whose production requires SEQUENTIALLY DEPENDENT phases (real quantitative analysis of the internal data -> charts built from that analysis -> professional assembly), so the request genuinely deserves tens of minutes of autonomous work. Make it one of these two shapes, whichever fits the scenario better: (1) TWO complementary formats built from the same analysis - e.g. a board presentation deck PLUS a 2-page summary PDF for the field team, or a formal proposal document PLUS a one-page web briefing; or (2) a WORKING INTERACTIVE TOOL - a self-contained web app the user opens in a browser (e.g. a pricing / capacity / what-if simulator) whose coefficients come from the actual data analysis, plus a short document explaining the model. The prompt should sound like a real executive request and SHOULD state 1-2 explicit quality conditions in natural business language (e.g. "lead with the conclusion on the first page", "every number must be sourced from our data or a cited reference") - these conditions make the agent's self-review-and-rebuild loop visible in the demo. Patterns A and B MUST use DIFFERENT deliverable formats so the demo shows variety.${ crossOrgEnabled_() ? '\n      - **CROSS-DEPARTMENTAL DELIVERABLE (MANDATORY)**: the delegated mission MUST synthesize data owned by at least two departments and address its deliverable to the department (or executive) that owns the decision - framed as the journey summary of the demo narrative: what happened in each department, where the process stalled, and what was resolved. Because the Pattern A prompt occupies the final core slot, ITS deliverable also carries the NARRATIVE ARC finale duty: it MUST close with the quantified process outcomes of the demo narrative (before/after cycle time or lead time, items resolved, hand-offs completed).' : '' }${ (options.enableWorkspaceMcp || options.enableWorkspaceAuth) ? `
       - **MANDATORY WORKSPACE COMBINATION**: Google Workspace access is ALSO enabled for this demo, and the autonomous agent can act on the user's Workspace (save files to Drive as native Google Slides/Docs/Sheets, draft Gmail messages, post to named Google Chat spaces, create Calendar events). At least ONE of the two autonomous prompts MUST chain a Workspace action onto the deliverable so the demo showcases BOTH capabilities together, e.g.: "Research the latest industry trends, build the executive deck, save it to my Drive as Google Slides, and draft an email to the leadership team summarizing it" or "...and post the summary with the document link to the <team> Chat space, then set up a 30-minute review meeting on my calendar". Keep the Workspace actions realistic for the persona, and prefer DRAFT email wording (the agent creates drafts, it does not send unless explicitly told).` : ''}
     - 🎯 SLOT ASSIGNMENT (overrides the base 7-prompt distribution): put Pattern B in the Prompt 5 slot, REPLACING the large-scope background workflow prompt (the autonomous delegation itself runs in the background and demonstrates background execution plus completion announcements, so that story is preserved). Weave Pattern A into the Prompt 7 slot (End-to-End Strategic Automation): its web research + internal data synthesis IS the end-to-end showcase${ (options.enableWorkspaceMcp || options.enableWorkspaceAuth) ? ', and the MANDATORY WORKSPACE COMBINATION chain belongs there' : ''}. Do NOT merge Patterns A and B into a single prompt - the demo needs TWO distinct autonomous moments. Because slots 5 and 7 are now autonomous, fold the MANDATORY INTERACTIVE DASHBOARD prompt into slot 1 or 2 (make one of the foundation prompts ask for the browser-openable interactive overview dashboard, keeping its explicit open-in-browser signal) - the dashboard prompt must NOT displace slot 5 or 7 and must NOT be dropped.
     - Write both prompts as natural business-user requests, in the same language as the 'userGoal', woven into the demo storyline with the KPIs, entities, and business terms you generated (NEVER raw table or column names - the base NO TABLES/COLUMNS rule still applies to these prompts).
     - 🎯 CRITICAL - AVOID OVERLAP WITH LIGHTER TOOLS: the agent ALSO has fast inline tools (SQL queries, quick analysis, in-chat dashboards). If a prompt can be fully answered by querying the demo database and summarizing, the model will answer it inline and the autonomous agent will NOT be demonstrated. Therefore the TWO autonomous prompts MUST require at least one of: live web research, producing a downloadable file, or building-and-running code - things the inline tools cannot do.
 \n`;
+  }
+  // M2 (v11.16): slot-budget arbitration. Only appended when 2-prompt
+  // capability mandates exist that could overflow the 7 core slots; encore
+  // items are the explicit overflow destination so no capability gets
+  // crammed into a shared prompt or silently dropped (analysis gap 8.5).
+  if (crossOrgEnabled_()) {
+    const _mandateSources = (options.enableWorkspaceMcp ? 1 : 0)
+      + (options.enableComputerUse ? 1 : 0)
+      + ((options.importedMcpList && options.importedMcpList.length) ? options.importedMcpList.length : 0);
+    if (_mandateSources >= 1) {
+      prompt += `\n- **🎛 SLOT BUDGET & ENCORE PROMPTS (MANDATORY ARBITRATION)**: The 7 core prompts keep the base distribution (and any SLOT ASSIGNMENT overrides above). If the capability mandates above cannot ALL fit into the 7 core slots without cramming multiple showcase missions into a single prompt, do NOT dilute or silently drop any of them - generate up to THREE additional ENCORE prompts (positions 8-10) instead:
+    - Each encore prompt showcases exactly ONE overflow capability as an epilogue or alternate-angle scene of the SAME business narrative (an encore may build on the core story's state; the core story must NEVER depend on an encore).
+    - Tag every encore prompt by including the string "encore" in its "tags" array. Core prompts must NOT carry that tag.
+    - Total demoGuide length: exactly 7 core items plus 0 to 3 encore items.
+\n`;
+    }
   }
   const response = callVertexAIWithRetry(prompt);
   
@@ -883,6 +947,10 @@ function planAndGenerateData(userGoal, options) {
     }
   }
 
+  // Density repair BEFORE validation: cheaply top up an under-dense
+  // transaction table instead of failing the whole run (v11.25).
+  expandThinTables_(parsed, options);
+
   // Validation and Clean-up
   validateGeneratedData(parsed, options.rowCount, options.dataProfile);
 
@@ -895,6 +963,7 @@ function planAndGenerateData(userGoal, options) {
     publicDatasetId: resolvePlannedPublicDatasetId_(parsed.publicDatasetId, options),
     agentShortName: parsed.agentShortName || null,
     oneSentenceSummary: parsed.oneSentenceSummary || null,
+    operatingModel: parsed.operatingModel || null,
     demoGuide: parsed.demoGuide,
     externalFiles: parsed.externalFiles || [],
     appliedFactors: parsed.appliedFactors || null,
@@ -997,6 +1066,7 @@ function getTechnicalInstruction_() {
     "When rendering the Batch Editor, you MUST use the following component structure for each row `i` (replace `i` with the actual 0-based index). " +
     "Ensure all component IDs are completely unique (e.g., by appending `_i` to each ID). " +
     "You MUST wrap the entire A2UI JSON payload in <a2ui-json> tags. " +
+    "The block MUST contain all three messages in order — beginRendering, dataModelUpdate (the initial row values), and surfaceUpdate (every row component) — inside that SAME <a2ui-json> block. Stopping after beginRendering + dataModelUpdate opens an empty surface and the editor never appears. " +
     "Here is the mandatory layout structure for a single row `i`:\n" +
     "[\n" +
     "{\n" +
@@ -1083,6 +1153,8 @@ function getTechnicalInstruction_() {
     
     "11. **SUGGESTION CHIPS (CRITICAL)**: At the END of EVERY response, you MUST append a lightweight A2UI suggestion chip bar using surfaceId 'suggestions' and root='root' containing a Row of 3-4 Buttons with sendText actions. The chip block MUST be COMPLETE: a single <a2ui-json> block containing BOTH the beginRendering message AND the surfaceUpdate message with all Button components — never emit beginRendering alone. NEVER write any plain text or markdown headers (like \"Next Actions\", \"💡 Next Actions\", or other localized header equivalent) before the suggestions block; the system will automatically render the appropriate header. " +
     "**BUTTON SCHEMA CONFORMANCE (CRITICAL)**: NEVER nest components inside a Button's 'child' property. 'child' MUST always be a flat string pointing to the ID of a separately defined Text component, and that Text component MUST be included in the SAME surfaceUpdate components array as its Button — a Button whose label Text component is missing renders as a BLANK button in the UI. Before finishing any A2UI block, verify every Button's child id has a matching Text component in the same block.\n" +
+    "**EVERY CARD MUST BE COMPLETE (CRITICAL — applies to ALL surfaces, not just suggestions)**: a beginRendering message only OPENS an empty surface; the components are delivered by surfaceUpdate. EVERY <a2ui-json> block you emit MUST therefore contain BOTH the beginRendering message AND the surfaceUpdate message carrying the full component tree for that same surfaceId, in the SAME block. A dataModelUpdate is NOT a substitute for surfaceUpdate: emitting [beginRendering, dataModelUpdate] and then moving on renders NOTHING and the user sees only your prose. This is the single most common way a rich card silently disappears — before you close any <a2ui-json> block, confirm it contains a surfaceUpdate whose components array includes the root id named in beginRendering.\n" +
+    "**ACTION CONTEXT KEYS MUST NOT COLLIDE WITH COMPONENT IDS (CRITICAL)**: inside a Button action's 'context', every 'key' MUST be different from every component 'id' in the same card. A context key that matches a component id is resolved against the component tree by the client and arrives server-side as the unusable literal key '[object Object]', so that value is LOST. Prefix component ids to keep them distinct (context key \"title\" with component id \"fTitle\", key \"qty\" with id \"qtyField\", and so on).\n" +
     "**A2UI CARD INTERACTION EXCEPTION (STRICT RULE)**: When your response already contains a major interactive A2UI card featuring its own control buttons " +
     "(such as the Welcome Card onboarding buttons, the Analysis Plan pre-flight card buttons like Run inline / Run in background / Adjust, or the Workflow Execution Plan mode selection buttons like Immediate/Background/Scheduled), " +
     "you **MUST NOT** output any suggestion chip bar at the bottom of your response. The card's own control buttons are sufficient. " +
@@ -1138,6 +1210,15 @@ function getTechnicalInstruction_() {
   return inst;
 }
 
+/**
+ * M2 cross-org pack kill switch. Setting Script Property
+ * DISABLE_CROSSORG_PACK=1 blanks every cross-departmental prompt insertion at
+ * once - an admin rollback lever (no redeploy), NOT a user-facing option.
+ */
+function crossOrgEnabled_() {
+  return !SCRIPT_PROPS.getProperty('DISABLE_CROSSORG_PACK');
+}
+
 function buildPlanningPrompt(userGoal, options) {
   const profile = getDataProfile_(options.dataProfile || 'standard');
   const maxRows = Math.min(options.rowCount || profile.defaultRowCount, 150);
@@ -1150,7 +1231,68 @@ function buildPlanningPrompt(userGoal, options) {
        * OUTPUT FIELD (MANDATORY): In your JSON response, set "publicDatasetId" to EXACTLY this ID. Do NOT invent or substitute a different dataset.
        * DEMO GUIDE REQUIREMENT (MANDATORY): At least ONE prompt in 'demoGuide' MUST explicitly ask the agent to enrich the analysis by combining the synthetic tables with this external public dataset (e.g., correlate internal metrics with the external context it provides). Design the JOIN keys in the synthetic tables so this prompt produces meaningful results.`
     : `- IMPORTANT: NO public dataset should be used for this demo. Focus ONLY on synthetic tables below. Do NOT attempt to JOIN with external public-data. In your JSON response, set "publicDatasetId" to null.`;
-  
+
+  // v11.12 (P10): the Target Persona selected in the wizard becomes the demo's
+  // protagonist across every generated artifact. Empty string = no persona
+  // selected = the prompt is unchanged from pre-persona behavior.
+  const anchorPersonaText = sanitizePersonaText_({
+    label: options.targetPersona || '',
+    description: options.targetPersonaDesc || ''
+  });
+  const anchorPersonaBlock = anchorPersonaText
+    ? '\n## Anchor Persona (MANDATORY)\nThe demo creator selected the primary user of this agent: ' + anchorPersonaText + '. This persona is the PROTAGONIST of the demo: (a) the businessInstruction MUST define the agent as this persona\'s process operator; (b) demoGuide Prompt 1 MUST open from this persona\'s daily situation; (c) any autonomous delegation deliverable MUST be addressed to this persona\'s decision chain; (d) human-approval gates SHOULD be decisions this persona (or their direct manager) owns.\nPRECEDENCE: even when the scenario suggests a different natural protagonist (e.g., the manager or supervisor of the function), the SELECTED persona still wins - keep the selected persona as the protagonist and cast other roles as hand-off counterparts. Do NOT substitute a similar-but-different job title for the selected persona.\n'
+    : '';
+  const anchorRotationNote = anchorPersonaText
+    ? ' If an Anchor Persona is defined above, keep that persona as the protagonist of ALL prompts and rotate other personas ONLY as hand-off counterparts (the roles the process flows to or from), never replacing the protagonist\'s thread.'
+    : '';
+
+  // M4 (P17-lite): ground synthetic data in the researched company's real
+  // scale. Backticks stripped so runtime facts can never break the template
+  // pipeline downstream. Absent facts = prompt unchanged.
+  let quantFactsBlock = '';
+  if (options.quantFacts && options.quantFacts.facts && Object.keys(options.quantFacts.facts).length) {
+    const bt = String.fromCharCode(96);
+    const factsText = JSON.stringify(options.quantFacts.facts, null, 1).split(bt).join('');
+    const qfName = String(options.quantFacts.companyName || 'the company').split(bt).join('');
+    quantFactsBlock = '\n## Data Grounding (verified real-world scale)\nThe following quantitative facts about ' + qfName + ' were gathered from public sources during domain research. Reflect them in the generated data so the demo feels like THIS organization: master-table sizes, regional distribution, product-category mix, and transaction volumes should be plausible for an organization of this scale, scaled down proportionally to the row-count budget (note the scaling ratio in table descriptions where helpful, e.g. "representative sample of ~1,050 stores"). Apply ONLY if the Business Problem is about this company; ignore otherwise.\n' + factsText + '\n';
+  }
+
+  // ---- M2 cross-org pack (v11.16) ----
+  // Every block below is blanked by the DISABLE_CROSSORG_PACK kill switch.
+  const CROSSORG = crossOrgEnabled_();
+  const encoreNote = CROSSORG
+    ? ' (7 CORE prompts; up to 3 additional prompts tagged "encore" are allowed ONLY under the SLOT BUDGET arbitration rule when capability mandates cannot fit the core slots)'
+    : '';
+  // P5: one process instance woven through the existing slot structure, with
+  // a quantified-outcome finale (analysis issues 7 and critique 4).
+  const narrativeArc = CROSSORG ? `
+    0. **NARRATIVE ARC (MANDATORY)**: All 7 core prompts MUST follow ONE end-to-end business process instance (e.g., one problematic order, one flagged application) across the organization - each prompt builds on the state changes made by the previous one, while still fulfilling its slot's functional requirement below. The slot structure (including any SLOT ASSIGNMENT overrides) stays unchanged; the arc is WOVEN THROUGH the slots, never replaces them. The final core prompt MUST make the agent present the full journey with QUANTIFIED process outcomes (before/after cycle time, items resolved, hand-offs completed).` : '';
+  // P9: autonomy backstage, decisions onstage (analysis critique 2).
+  // v11.17: reworded - the first cut collided with the NO-EXPLICIT-HITL rule
+  // (prompts may not contain approval wording), so the planner ignored it.
+  // Decision beats must come from TASK DESIGN, not prompt wording.
+  const hitlChoreo = CROSSORG ? `
+    2c. **FOREGROUND/BACKGROUND CHOREOGRAPHY (MANDATORY)**: At least TWO core prompts must be DESIGNED so the agent's own confirmation flow fires on stage: give those prompts tasks whose data contains threshold-crossing or exception items (per the workflow's DECISION POINTS), so the agent - following its own rules - must present an approval card with options and evidence, wait for the one-click human decision, and visibly change the operational-database state. The NO-EXPLICIT-HITL rule above still applies: do NOT write approval requests into the prompt text; the decision beat comes from the agent's behavior on that data, never from the wording. Reserve background execution for (a) long autonomous delegations, (b) large batch runs, (c) scheduled jobs; everything else runs in the foreground showing reasoning and intermediate results.` : '';
+  // P3: cross-departmental mandate for BOTH archetypes, with industry pattern
+  // variety (critique 5) and a single-department escape hatch.
+  const crossOrgMandate = CROSSORG ? `
+- **🏢 CROSS-DEPARTMENTAL MANDATE (applies to BOTH archetypes)**: The agent is not a single team's assistant - frame it as the company's process operator working across departments on shared core-system data.
+    - Type A queues MUST contain tasks whose resolution requires touching data owned by at least TWO different departments, with each hand-off represented as a state transition the agent performs on behalf of the sending department and visible to the receiving one.
+    - Type B insights MUST quantify impact across at least TWO departments and route each proposal to the department that owns the decision.
+    - Vary the organizational shape by industry instead of repeating one template - examples: manufacturing procurement -> production -> quality; banking sales-branch -> underwriting -> compliance; retail store -> supply chain -> finance; **approval pre-review** (the agent reviews a submission against the RECEIVING department's own rules BEFORE it is submitted); **multi-department plan refinement** (a draft plan is validated against other departments' actual data and thresholds, then routed to each owner for approval).
+    - ESCAPE HATCH: where the business problem plausibly involves only ONE department, do NOT force departments into it - model the hand-off with an adjacent supporting function (e.g., support -> billing, support -> product quality), or keep it single-team if even that feels unnatural. The user's goal always wins.` : '';
+  // P1: shared core-system data model + department-owned rules as data
+  // (analysis issues 2/8; rules-as-data underpins the pre-review pattern).
+  const crossOrgDataModel = CROSSORG ? `
+- **SHARED CORE-SYSTEM DATA MODEL (MANDATORY)**: Model the tables as a slice of the company's core system of record (ERP/CRM/WMS-like), NOT as one team's private dataset.
+    1. At least ONE transactional table MUST be read and written by two or more distinct departments for different purposes (e.g., orders: created by Sales, fulfilled by Logistics, invoiced by Finance). Add an "owning_department" or equivalent dimension where natural.
+    2. **Department-owned rules as data**: generate at least ONE table (or clearly described catalog entry) holding rules/thresholds/checklists OWNED by one department that ANOTHER department's workflow must consult (e.g., procurement approval rules that sales submissions are pre-checked against; credit limits owned by Finance that order intake must respect). The rules table MUST still connect to the rest of the schema: include the key column(s) its rules apply to (e.g., category_id, product_id, customer_rank, department) named EXACTLY as in the tables they reference - the NO ISOLATED TABLES rule applies to rules tables too.
+    3. At least ONE Audit Seed MUST be a **cross-departmental discrepancy**: a mismatch invisible inside any single department's view, detectable only by joining data across departmental usage contexts.
+    (ESCAPE HATCH: for a genuinely single-department goal, scope all three to the department and its closest supporting function instead.)` : '';
+  // P2: organizational actors inside the workflow definition (issue 4).
+  const crossOrgWorkflow = CROSSORG ? `
+- **ORGANIZATIONAL ACTORS (MANDATORY)**: Each STEP must name the department or role responsible in the real-world process (e.g., Procurement -> Warehouse -> Accounts Payable -> Treasury), and each DECISION POINT must state WHICH department's rule it enforces. The workflow MUST cross at least TWO departments, with each hand-off represented as a state transition performed on behalf of the sending department and visible to the receiving one. Align HITL GATES with these department boundaries (threshold breaches and exceptions are approved by the receiving department's owner). ESCAPE HATCH: for a genuinely single-department goal, use the adjacent supporting function instead.` : '';
+
   return `You are a versatile data analyst and BigQuery expert capable of generating realistic datasets for ANY industry or business function.
 Design and generate a demo dataset based on the following business problem.
 
@@ -1204,8 +1346,8 @@ You MUST classify the demo scenario into one of the following two agent archetyp
 - **When to choose**: The workflow is consultative, strategic, or diagnostic (e.g., analyzing ad spend to optimize ROI, predicting customer churn trends, advising on portfolio risk).
 - **Firestore Strategy**: Define the collection as an **Insights Feed / Alert Log / Proposal Console** (collection name like 'marketing_proposals', 'strategic_alerts'). Documents should represent automated recommendations, high-risk anomalies, or budget proposals requiring review (document status can be 'PROPOSAL_PENDING', 'APPROVED', 'ALERT_ACTIVE', 'ARCHIVED'). This allows the Data Viewer to act as a real-time strategic insight feed!
 - **Instruction Strategy**: Define the agent as an expert advisor. Instruct it to perform deep SQL queries, cross-source reasoning, and visual reporting. Instruct it to write back strategic proposals or alerts to Firestore to keep the real-time console updated.
-
-- **🚀 THEME: Autonomous Workflow Execution (Agent as an Operator who ACTS)**: 
+${crossOrgMandate}
+- **🚀 THEME: Autonomous Workflow Execution (Agent as an Operator who ACTS)**:
 
     - **Focus**: End-to-end business workflows where the agent autonomously DETECTS triggers, PLANS execution steps, EXECUTES actions (DB writes, status updates, escalations), VALIDATES outcomes, and REPORTS completion — not just passive analysis.
     - **Workflow Execution Pattern (MANDATORY for Type A)**:
@@ -1218,7 +1360,7 @@ You MUST classify the demo scenario into one of the following two agent archetyp
 
 ## Business Problem
 ${userGoal}
-
+${anchorPersonaBlock}${quantFactsBlock}
 ## Requirements
 - Data Profile: **${profile.label}** (${profile.tableCount} tables)
 - Table Design & Row Counts (Star Schema Strategy — ${profile.label} Profile):
@@ -1293,6 +1435,7 @@ If the business problem mentions a **specific company, organization, or brand**,
 **If you are unsure whether a specific entity belongs to the mentioned company, DO NOT include it. It is better to use fewer but accurate data points than to include factually incorrect associations.**
 
 **If NO specific company/organization is mentioned in the business problem**: Create a COHERENT fictional business context. Choose ONE realistic company profile (industry vertical, size, geography) and generate ALL data as if it belongs to this single hypothetical entity. Ensure internal consistency - all facilities, products, and personnel should belong to the same fictional organization. Do NOT mix data from multiple unrelated real-world companies.
+${crossOrgDataModel}
 
 ### 5.5 Image File Generation (CRITICAL for Non-structured input goals)
 If the Business Problem naturally involves processing non-structured inputs like hand-written papers, faxes, or photos of physical assets:
@@ -1379,7 +1522,7 @@ Each workflow MUST define:
 - **DECISION POINTS**: Conditional branches based on data values or business rules (e.g., 'if discrepancy < 5%, auto-approve; if >= 5%, escalate')
 - **HITL GATES**: Which steps require human approval - mark as [APPROVAL_REQUIRED]. Low-risk actions (status updates, log entries) should be AUTO-EXECUTED without asking.
 - **COMPLETION CRITERIA**: How the agent knows the workflow is done
-- **ERROR HANDLING**: What to do when a step fails
+- **ERROR HANDLING**: What to do when a step fails${crossOrgWorkflow}
 
 Example workflow structure (adapt to the specific business domain):
 "WORKFLOW: 'Invoice Discrepancy Resolution'
@@ -1440,7 +1583,8 @@ Output in the following JSON format. Output **pure JSON only without code blocks
     "documents": [
       "MANDATORY: Generate at least 8 documents representing items at different stages of processing.",
       "- If Type A (Operational): Use status 'PENDING', 'IN_PROGRESS', 'RESOLVED', 'ESCALATED' representing a workflow task queue.",
-      "- If Type B (Advisory): Use status 'PROPOSAL_PENDING', 'APPROVED', 'ALERT_ACTIVE', 'ARCHIVED' representing an insights feed or strategic proposal board.",
+      "- If Type B (Advisory): Use status 'PROPOSAL_PENDING', 'APPROVED', 'ALERT_ACTIVE', 'ARCHIVED' representing an insights feed or strategic proposal board.",${CROSSORG ? `
+      "- PROCESS STATE & AUDIT TRAIL (MANDATORY): every document's data MUST also include: current_department (the department currently holding the item), next_department (where it goes after the current step; empty string when terminal), and history - an array of audit entries, each an object with keys timestamp, actor (agent name or person), action, approver (person name when a human approved; empty otherwise), evidence_ids (array of record IDs consulted). Seed 1-3 realistic history entries per document so the operations console shows processes already in motion across departments.",` : ''}
       {
         "id": "Unique ID matching BigQuery data for correlation",
         "data": {
@@ -1459,7 +1603,8 @@ Output in the following JSON format. Output **pure JSON only without code blocks
   "referenceDate": "MUST be exactly today's date, ${todayStr} (see TEMPORAL ANCHOR).",
   "publicDatasetId": "Echo the RELATED PUBLIC DATASET id exactly as provided above, or null if no public dataset was provided.",
   "agentShortName": "A concise 2-3 word role-based name for the agent (e.g., 'Supply Chain Analyst', 'Fraud Investigator').",
-  "oneSentenceSummary": "A concise, professional one-sentence summary of the business challenge and the generated solution.",
+  "oneSentenceSummary": "A concise, professional one-sentence summary of the business challenge and the generated solution.",${CROSSORG ? `
+  "operatingModel": "2-4 sentences in ENGLISH describing this demo's organizational operating model: the departments involved, which data and rules each department owns, and the hand-off/approval boundaries between them. This briefs downstream autonomous workers; keep it in English regardless of the demo language.",` : ''}
   "appliedFactors": {
     "temporalPatterns": ["List of 2-3 specific temporal patterns applied"],
     "correlations": ["List of 2-3 specific data correlations applied"],
@@ -1474,17 +1619,19 @@ Output in the following JSON format. Output **pure JSON only without code blocks
     {
       "title": "...",
       "prompt": "...",
-      "requiredFileId": "file1 or empty",
+      "requiredFileId": "file1 or empty",${CROSSORG ? `
+      "watchPoint": "One short sentence for the demo OPERATOR (not the agent): what to watch on screen when this prompt runs (e.g., after the approval click, the item moves to the next department on the operations console). Same language as the prompts.",` : ''}
       "tags": [...]
     }
   ]
 }
 
 ## Critical Notes
-- **DEMO PROMPTS (CRITICAL)**: Generate EXACTLY 7 structured demo prompts that showcase the agent's "reasoning" and "operational action" capabilities.
+- **DEMO PROMPTS (CRITICAL)**: Generate EXACTLY 7 structured demo prompts${encoreNote} that showcase the agent's "reasoning" and "operational action" capabilities.
     - **NO PRODUCT NAMES (CRITICAL)**: DO NOT include specific product names like 'Firestore', 'BigQuery', or 'Google Cloud' in the prompt text. Use completely generic business terminology like 'our operational database', 'internal records', or 'the compliance tracker'.
     - **NO FILENAMES (CRITICAL)**: DO NOT include specific file names or extensions (e.g., 'market_report_2024', 'data.tsv') in the prompt text. Use generic phrasing.
-    1. **DISTRIBUTION & ADVANCED PROGRESSION (CRITICAL)**: Generate exactly 7 prompts tailored completely to the specific business challenge and industry context:
+${narrativeArc}
+    1. **DISTRIBUTION & ADVANCED PROGRESSION (CRITICAL)**: Generate exactly 7 core prompts${CROSSORG ? ' (encore overflow items only per the SLOT BUDGET rule, when present)' : ''} tailored completely to the specific business challenge and industry context:
         - **Prompts 1-2 (Foundation & Discovery)**: Data overview, schema exploration, and initial audit scan. Establish familiarity with the data landscape. At least ONE of these MUST be a metadata-driven discovery question that pushes the agent to consult the data catalog metadata first (column meanings, units, allowed values, table relationships) before querying — phrase it generically (e.g. 'What data do we have available and what kinds of analysis can it support?') without naming any product.
         - **Prompt 3 (CROSS-SOURCE DISCOVERY - WOW MOMENT, MANDATORY)**: This prompt MUST be designed so that the answer REQUIRES the agent to discover a hidden connection between the external file data and BigQuery data that is NOT obvious from either source alone. Phrase it as a high-level strategic question (e.g., 'What is the biggest untracked financial risk across our operations?') so the agent must autonomously decide to cross-reference the uploaded file against internal records. The Audit Seed from Section 6a provides the discrepancy the agent should discover. This prompt creates the most impressive demo moment.
         - **Prompts 4-5 (MULTI-STEP DEPENDENT WORKFLOW - WOW MOMENT)**: These prompts MUST trigger FULL multi-step workflow execution demonstrating INTERDEPENDENT step chains where each step depends on the previous step's output. Prompt 4 MUST be a workflow with 10 items or fewer designed for IMMEDIATE synchronous execution. Each step must depend on the previous step's output (e.g., 'Scan all pending items, classify by severity, auto-process anything within tolerance, and generate an exception report for the remaining items'). The agent should demonstrate the full SCAN-CLASSIFY-PROCESS-ESCALATE-NOTIFY-AUDIT dependency chain in real-time. Prompt 5 MUST be a LARGE-SCOPE workflow implying more than 10 items or long-running processing, where the agent should propose BACKGROUND execution mode. Phrase it as a comprehensive batch operation (e.g., 'Run a full reconciliation across all records from the past quarter - identify discrepancies, auto-correct minor variances, flag major issues, and generate a compliance report'). The agent MUST demonstrate the execution mode selection dialog (immediate vs. background vs. scheduled).
@@ -1492,10 +1639,15 @@ Output in the following JSON format. Output **pure JSON only without code blocks
         - **Prompt 7 (End-to-End Strategic Automation)**: A complex prompt combining cross-source data analysis + conditional workflow execution + notification drafting + audit logging. This MUST require the agent to: (1) analyze data from multiple sources (BigQuery + Firestore + external file), (2) propose a multi-step workflow based on its findings, (3) execute with the appropriate execution mode, (4) draft a notification summary, and (5) create audit entries. This showcases the full spectrum of the agent's capabilities as an autonomous operator.
         - **NO EXPLICIT HITL IN PROMPTS (CRITICAL)**: The generated prompt text MUST NOT contain explicit instructions like 'Please wait for my approval' or 'Propose first'. Present the request as a straightforward business instruction (e.g., 'Register these anomalies as new compliance alerts in the database'). The agent will naturally implement the confirmation step autonomously based on its core system instructions!
         - **INTERACTIVE DASHBOARD (MANDATORY)**: Exactly ONE of the 7 prompts MUST ask the agent to build an interactive dashboard the user can OPEN AND EXPLORE IN A BROWSER. The prompt text MUST contain an explicit open-in-browser / interactive signal (e.g. 'that I can open and explore in my browser', 'an interactive dashboard I can click into') - this is what makes the agent publish a hosted interactive page instead of a static summary slide. Do NOT phrase it as a pure 'summarize / analyze' request (e.g. avoid 'Generate a dashboard that summarizes ...'), because that reads as an analysis and yields a slide, not an interactive dashboard. Good example: 'Build me an interactive executive dashboard I can open in my browser and explore - key metrics, top segments, trends, and risk items.' Fold this into a natural overview or strategic prompt so the total stays EXACTLY 7. Phrase it generically (no product names).
-    2. **PERSONA ROTATION (CRITICAL)**: Vary the tone and perspective by rotating personas for each prompt (e.g., CFO, Ops Manager, Regional Director, Front-line Lead).
+    2. **PERSONA ROTATION (CRITICAL)**: Vary the tone and perspective by rotating personas for each prompt (e.g., CFO, Ops Manager, Regional Director, Front-line Lead).${anchorRotationNote}
+    2b. **FILE BINDING - requiredFileId (MANDATORY)**: Set "requiredFileId" ONLY on prompts that cannot succeed without that uploaded file. Never leave requiredFileId empty on ALL 7 prompts.
+        - The CROSS-SOURCE DISCOVERY prompt (Prompt 3) MUST set requiredFileId to the id of the Excel or PDF file it reconciles against the database.
+        - **VISION SHOWCASE (when 'externalFiles' contains image files)**: Either Prompt 3 or Prompt 4 MUST be a workflow that STARTS from reading the photographed/handwritten document image (read the document -> decompose it into individual line items -> reconcile each item against the database -> flag discrepancies -> route exceptions to human approval), and that prompt MUST set requiredFileId to the image file id. This is the multimodal vision showcase - do NOT leave the generated images unused by the demo script.
+        - Prompts that need no uploaded file MUST set requiredFileId to an empty string.${hitlChoreo}
     3. **EXTERNAL DATA NECESSITY & LOGICAL CONSISTENCY (CRITICAL)**: You MUST generate exactly one PDF file AND exactly one Excel file (.xlsx) unless it is completely impossible for the business context. The files generated MUST be external data (not inside the current system) and MUST be unstructured or semi-structured in format.
         - **LOGICAL LINKAGE**: ALL discrepancies or specific transaction IDs (e.g., "INV-7829") mentioned in the external file content MUST correspond to standard records that ACTUALLY EXIST inside the generated BigQuery CSV tables. Do NOT make up transaction IDs in the external file that do not exist in the database tables. This allows the user to find the anomaly by comparing the external file against the database.
         - **CROSS-SOURCE BINDING (MANDATORY)**: The Excel file MUST contain a column whose values are a SUBSET of a BigQuery table's primary key or unique identifier (e.g., order_id, invoice_number). At least 70% of the Excel rows MUST have matching records in the BigQuery tables to enable reliable JOIN-based cross-referencing. The PDF file MUST reference at least 3 specific record identifiers (IDs, invoice numbers, etc.) that exist in the BigQuery tables, enabling the agent to look up those exact records via SQL. This structural binding GUARANTEES that cross-source analysis will succeed during the demo.
+        - **PDF ID SELF-CHECK (MANDATORY)**: After writing the PDF fileContent, VERIFY it quotes at least 3 record identifiers copied VERBATIM from the generated CSV key columns (order/application/invoice IDs etc.). Aggregate figures and entity names are NOT sufficient - the demo's cross-source lookup depends on these exact IDs being queryable via SQL. If fewer than 3 verbatim IDs are present, ADD a "specific flagged cases" section to the PDF that lists the affected records BY ID before finalizing your response.
     3. **FILE FORMAT & REALISM (CRITICAL)**: 
         - For PDF files, generate **substantial, realistic, and highly structured business document content (at least 1,500 characters)** with clear titles, multiple sections using Markdown headings (e.g., '# Summary', '## Background', '### Details'), and bullet points ('- '). It MUST be unstructured text in a rich report format. 
             - **CHART TRANSLATION**: When including data chart placeholders '[CHART: Title, ... ]', you **MUST translate the Title and Metric Labels into the language of the business problem** (e.g., if the problem is in Japanese, translate 'Metrics' to Japanese).
@@ -1530,7 +1682,7 @@ Output in the following JSON format. Output **pure JSON only without code blocks
     - STRING values in the CSV data (e.g., product names, categories, person names, names of things)
     - systemInstruction
     - appliedFactors descriptions
-    - demoGuide titles and prompts
+    - demoGuide titles and prompts${CROSSORG ? ' and watchPoint' : ''}
     - externalFiles: fileName, fileContent, and the specific text strings specified for rendering inside 'imagePrompt' (e.g. Title, Recipient, Sender, Table Columns, and handwritten text values must be translated into the target language, while keeping the overall prompt description in English)
 - **TECHNICAL NAMES (CRITICAL)**: Table names, column names, and ALL ID fields (primary/foreign keys) MUST use English (snake_case) for technical compatibility and data integrity. Do NOT translate technical identifiers.
 - **ABSTRACT INSTRUCTIONS**: Do NOT mention column names in prompts.
@@ -1538,6 +1690,11 @@ Output in the following JSON format. Output **pure JSON only without code blocks
     1. **ALWAYS wrap text-based values** (STRING) in double quotes.
     2. **DO NOT wrap numeric values** (INTEGER, FLOAT) in quotes.
     3. **ALWAYS include the header row (column names) as the very first line of the CSV data. Skipping the header row is strictly forbidden.**
+
+## FINAL SELF-CHECK BEFORE EMITTING (MANDATORY — do this LAST, right before you output the JSON)
+1. **COUNT the data rows in every csvData.** At least one transaction/log table MUST contain ${profile.txnRowTarget}+ rows (hard floor: ${profile.txnMinRows} — responses under the floor are automatically REJECTED and the entire generation is retried, wasting the whole run). Master tables need ${profile.masterRows} rows. If any table is short, ADD realistic rows NOW — never summarize, sample, or truncate.
+2. **VERIFY externalFiles**: exactly one PDF (citing 3+ verbatim record IDs) and one Excel (40-80 detail rows), plus the two images when the scenario is paper-based. A missing file breaks a mandatory demo moment.
+3. Only after both checks pass, emit the JSON.
 `;
 }
 
@@ -1545,10 +1702,91 @@ Output in the following JSON format. Output **pure JSON only without code blocks
 // Step 2: Validation
 // ===========================================
 
+/**
+ * v11.25: targeted density repair. When the planner under-generates rows
+ * (mandate adherence dilutes as the planning prompt grows), regenerating the
+ * WHOLE demo via the client retry loop is expensive and tends to re-fail the
+ * same way for the same scenario. Instead, expand ONLY the largest
+ * (transaction) table with a small follow-up LLM call that appends schema-
+ * and FK-consistent CSV rows. Best-effort: on any failure the table is left
+ * as-is and the hard floor in validateGeneratedData still decides.
+ */
+function expandThinTables_(parsed, options) {
+  try {
+    const profile = getDataProfile_(options.dataProfile || 'standard');
+    if (!parsed.tables || !parsed.tables.length) return;
+    const counts = parsed.tables.map(t => ({ t: t, rows: Math.max(0, String(t.csvData || '').trim().split('\n').length - 1) }));
+    const maxEntry = counts.reduce((a, b) => (b.rows > a.rows ? b : a), counts[0]);
+    if (maxEntry.rows >= profile.txnRowTarget) return; // dense enough
+    const need = Math.min(profile.txnRowTarget, 120) - maxEntry.rows;
+    if (need <= 0) return;
+    const table = maxEntry.t;
+    const lines = String(table.csvData).trim().split('\n');
+    const header = parseCSVLine(lines[0]);
+    // FK domains: appended rows must reuse key values that already exist in
+    // the owning tables, so every JOIN keeps working.
+    const fkDomains = [];
+    for (const col of header) {
+      if (!col.endsWith('_id')) continue;
+      for (const other of parsed.tables) {
+        if (other === table) continue;
+        const oLines = String(other.csvData || '').trim().split('\n');
+        const oHeader = parseCSVLine(oLines[0] || '');
+        const idx = oHeader.indexOf(col);
+        if (idx === -1) continue;
+        const vals = [];
+        for (let i = 1; i < oLines.length && vals.length < 40; i++) {
+          const v = parseCSVLine(oLines[i])[idx];
+          if (v && vals.indexOf(v) === -1) vals.push(v);
+        }
+        if (vals.length) fkDomains.push('- ' + col + ' MUST be one of: ' + vals.join(', '));
+        break;
+      }
+    }
+    const sampleRows = lines.slice(0, 6).join('\n');
+    const prompt = 'You are extending a synthetic demo dataset. Append EXACTLY ' + need +
+      ' additional CSV data rows to the table "' + table.tableName + '".\n\n' +
+      'Schema (name:type): ' + (table.schema || []).map(function(c){ return c.name + ':' + c.type; }).join(', ') + '\n' +
+      'Existing rows (header + first samples - match their style, language, value ranges, and temporal window):\n' + sampleRows + '\n\n' +
+      (fkDomains.length ? 'FOREIGN KEY CONSTRAINTS (STRICT):\n' + fkDomains.join('\n') + '\n\n' : '') +
+      'Rules: unique new primary-key values continuing the existing numbering pattern; realistic variety (no copy-paste repetition); keep the same language as the existing string values; wrap STRING values in double quotes, never numbers; NO header row; NO code fences; NO commentary. Output ONLY the ' + need + ' CSV lines.';
+    const resp = callVertexAIWithRetry(prompt);
+    const fenceRe = new RegExp(String.fromCharCode(96, 96, 96) + '[a-z]*\\n?', 'g');
+    const newLines = String(resp).replace(fenceRe, '').split('\n')
+      .map(function(s){ return s.trim(); })
+      .filter(function(s){ return s && parseCSVLine(s).length >= Math.max(2, header.length - 2); });
+    if (newLines.length >= Math.min(10, need)) {
+      table.csvData = String(table.csvData).trim() + '\n' + newLines.join('\n');
+      console.log('[DENSITY REPAIR] ' + table.tableName + ': +' + newLines.length + ' rows (was ' + maxEntry.rows + ')');
+    } else {
+      console.warn('[DENSITY REPAIR] insufficient rows returned (' + newLines.length + ') for ' + table.tableName);
+    }
+  } catch (e) {
+    console.warn('[DENSITY REPAIR] skipped: ' + e.message);
+  }
+}
+
 function validateGeneratedData(planResult, targetRows, dataProfileId) {
   const profile = getDataProfile_(dataProfileId || 'standard');
   if (!planResult.tables || planResult.tables.length === 0) {
     throw new Error('No table definitions generated');
+  }
+
+  // v11.24: hard row-count floor. Observed live (v11.23 pharma demo): the
+  // planner emitted 8-row transaction tables (standard floor is 30) while
+  // using only a fraction of the output token budget - row-mandate adherence
+  // dilutes as the planning prompt grows. Throwing here routes the run into
+  // the client's existing auto-retry, so an under-dense response is
+  // regenerated instead of shipping a hollow demo.
+  const _rowCounts = planResult.tables.map(t => ({
+    name: t.tableName,
+    rows: Math.max(0, String(t.csvData || '').trim().split('\n').length - 1)
+  }));
+  const _maxRows = Math.max.apply(null, _rowCounts.map(r => r.rows));
+  if (_maxRows < profile.txnMinRows) {
+    throw new Error('Data density below profile floor: largest table has ' + _maxRows +
+      ' rows (< ' + profile.txnMinRows + ' required for the ' + profile.label + ' profile). Row counts: ' +
+      _rowCounts.map(r => r.name + '=' + r.rows).join(', '));
   }
   
   for (const table of planResult.tables) {
@@ -1948,7 +2186,7 @@ Return ONLY the name, nothing else.`;
 // managed_agent_instruction.txt, so it passes verbatim (runtime value, never
 // re-parsed as a JS template literal). English harness text only - the agent
 // is instructed to match the language of each delegated task.
-function buildManagedAgentInstruction_(businessInstruction, datasetId, fsCollection, hasSkills, workspaceActions) {
+function buildManagedAgentInstruction_(businessInstruction, datasetId, fsCollection, hasSkills, workspaceActions, browserFindings, operatingModel) {
   const nl = '\n';
   const text =
     'You are an autonomous specialist agent working inside a secure cloud sandbox with a bash terminal, a persistent filesystem, code execution, pip/npm installs, Google Search, and web page reading.' + nl +
@@ -1956,6 +2194,11 @@ function buildManagedAgentInstruction_(businessInstruction, datasetId, fsCollect
     '--- BUSINESS CONTEXT ---' + nl +
     (businessInstruction || 'No additional business context provided.') + nl +
     '--- END BUSINESS CONTEXT ---' + nl + nl +
+    (operatingModel ? (
+    '--- OPERATING MODEL (organizational context) ---' + nl +
+    operatingModel + nl +
+    'Frame your deliverables within this operating model: attribute findings to the departments that own the data, address recommendations to the department that owns the decision, and describe hand-offs between departments explicitly.' + nl +
+    '--- END OPERATING MODEL ---' + nl + nl) : '') +
     'SANDBOX SOFTWARE (use it - do not rediscover it)' + nl +
     '- Preinstalled Python 3.11 packages: pandas, numpy, beautifulsoup4, requests, pyyaml. Preinstalled Node.js 20: typescript, create-vite, create-next-app. Preinstalled UNIX tools: git, ripgrep (rg), fd, jq, curl, wget, rsync, tree, bc, unzip.' + nl +
     '- Additional pip/npm installs are allowed and PERSIST in this environment snapshot across tasks - try the import first (a warm-up usually preinstalled python-pptx, python-docx, reportlab, matplotlib, japanize-matplotlib, pypdf); install only what is actually missing, never reinstall.' + nl +
@@ -1966,25 +2209,37 @@ function buildManagedAgentInstruction_(businessInstruction, datasetId, fsCollect
     '- Save every intermediate product to a file before moving on (query results as CSV, computed tables, chart PNGs, drafts): later phases and repeat runs must be able to reuse them without redoing the work.' + nl +
     '- When the task asks for MULTIPLE deliverables, gather data and build charts ONCE, then assemble each deliverable from the shared assets - never re-research per deliverable.' + nl + nl +
     'DATA ACCESS' + nl +
-    '- BigQuery MCP tools give you direct read access to the demo dataset: ' + datasetId + '. Firestore MCP tools expose the operational collection: ' + fsCollection + '. Dataplex Knowledge Catalog MCP tools let you discover and understand these data assets semantically (treat the catalog as read-only).' + nl +
-    '- Query internal data EARLY in the task: the data-tool credentials attached to each delegation expire after about an hour.' + nl + nl +
+    '- The task message is your ONLY source of internal business data. When it contains an INPUT DATA block, those figures were queried from the internal systems moments before delegation by the requesting assistant: they are authoritative, complete, and sufficient for the deliverables. Build DIRECTLY from them.' + nl +
+    '- YOU HAVE NO DATABASE ACCESS. There is no BigQuery tool, no Firestore tool, and no data-catalog tool in your tool list, and there is no way for you to query the dataset ' + datasetId + ' or the collection ' + fsCollection + ' yourself. The requesting assistant holds those tools; you do not. Do not plan around getting access.' + nl +
+    '- NO SHELL CREDENTIALS, EVER: bq, gcloud and gsutil exist on PATH but are NOT authenticated, and they never will be. This sandbox has no ADC file, no metadata server, no service-account key, and no sudo. Do NOT run gcloud auth list, do NOT curl the metadata server, do NOT search the filesystem for credential files, and do NOT try to authenticate - every one of those paths is a dead end that burns your run.' + nl +
+    '- MISSING FIGURES: if the task genuinely needs a number INPUT DATA does not contain, do not go looking for it. Build every part of the deliverable you can, use a clearly labelled placeholder or omit the item, and list the exact missing figures at the end of your report so the assistant can query them and re-delegate.' + nl +
+    '- BOUNDED INVESTIGATION: if any access attempt fails twice, stop investigating. Proceed to build and upload the deliverables from the data you already have, and state the gap plainly in your final report. Time spent hunting for access is time not spent producing the deliverable, and a delivered artifact with a stated limitation always beats an investigation with nothing to show.' + nl + nl +
+    (browserFindings ? (
+    'BROWSER FINDINGS' + nl +
+    '- When the task message contains a "BROWSER FINDINGS" block inside INPUT DATA, it is live web data gathered moments before delegation by the requesting assistant using its real interactive browser. Treat it as fresh and authoritative: build on it, cite its source URLs in your deliverables, and do NOT spend steps re-fetching the same pages.' + nl +
+    '- You have NO interactive browser yourself. If additional web information is needed beyond the findings, use your read-only tools (Google Search, web page reading). If a page truly requires interaction (login, form entry, clicking through an app), state that limitation in your report instead of attempting it, and never claim you operated a browser.' + nl + nl) : '') +
     (hasSkills ? (
     'SKILLS' + nl +
-    '- Skill packs are mounted at /.agent/skills. BEFORE building any deliverable (presentation deck, document, PDF, web page), list that directory, READ the matching SKILL.md, and follow its process, design system, and verification steps exactly.' + nl +
+    '- Skill packs are mounted at /workspace/.agent/skills (the mount is relative to your working directory - the absolute path /.agent/skills does NOT exist). BEFORE building any deliverable (presentation deck, document, PDF, web page), list that directory, READ the matching SKILL.md, and follow its process, design system, and verification steps exactly.' + nl +
+    '- If that path is missing, list .agent/skills from your working directory before concluding there are no skills - and if there really are none, build the deliverable anyway with your own best practices. A missing skill pack is never a reason to stop.' + nl +
     '- If the modern-web-guidance skill is present and you are building web content, consult it for modern web-platform best practices. Export DISABLE_TELEMETRY=1 before using its CLI.' + nl + nl) : '') +
     (workspaceActions ? (
     'WORKSPACE ACTIONS' + nl +
-    '- When the task message contains a WORKSPACE ACCESS section, you can act on the requesting user\'s Google Workspace via the gws CLI (Gmail drafts, Chat messages, Calendar events, Drive). Export the provided token as instructed, and consult the gws-* skills under /.agent/skills first.' + nl +
+    '- When the task message contains a WORKSPACE ACCESS section, you can act on the requesting user\'s Google Workspace via the gws CLI (Gmail drafts, Chat messages, Calendar events, Drive). Export the provided token as instructed, and consult the gws-* skills under /workspace/.agent/skills first.' + nl +
     '- INSTALLING gws: the warm-up usually pre-installs it at $HOME/bin/gws (invoke it by that absolute path - PATH exports do not persist between commands). If it is missing, install the static musl binary: mkdir -p $HOME/bin && curl -sL https://github.com/googleworkspace/cli/releases/latest/download/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz | tar xz -C $HOME/bin ./gws && chmod +x $HOME/bin/gws. Do NOT install via npm: the npm-delivered Linux binary requires GLIBC 2.39, which this sandbox does not have, and plain npm -g also fails with EACCES (no root).' + nl +
     '- CHAT POSTING FAILURES: if a Chat post fails with a 403 / PERMISSION_DENIED / configuration error, the cause is almost always that the demo project has not completed the ONE-TIME Google Chat API app configuration (a console step in the setup tutorial). State EXACTLY that in your report, include this link for the admin: https://console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat - and include the full message text you intended to post so the assistant can relay it. NEVER invent explanations like security restrictions or tenant policy.' + nl +
     '- DRIVE SAVES: when the task asks for a file saved to the user\'s Google Drive as Google Slides / Docs / Sheets, upload it with the gws CLI using Drive import-conversion (office file uploaded with the target Google mime type). Do it as soon as the file is ready, verify by reading the file metadata back, and put the returned webViewLink in your report. If the Drive upload fails, still deliver the file through the upload URLs and say the Drive save failed so the assistant can retry it.' + nl +
     '- DRIVE SAVES: when the task asks for a file in the user\'s Google Drive (or as Google Slides / Docs / Sheets), upload it yourself with the gws CLI using an import-conversion to the native Google format (pptx to Google Slides, docx to Google Docs, xlsx to Google Sheets), then include the returned Drive webViewLink in your report. ALSO upload the original office file to the matching deliverable upload URL as a backup.' + nl +
     '- Do Workspace operations EARLY in the task: the token expires after about an hour.' + nl +
     '- HARD GUARDRAILS: never SEND email (drafts only, unless the task explicitly says to send); never delete anything in Workspace; post Chat messages only to spaces the task explicitly names; never write the token into your report, logs, code, or files.' + nl +
+    '- ADMIN LIMITS: the provided token always carries USER-level scopes only - Admin SDK APIs (Directory, Reports / audit logs, license management) and org-wide admin operations fail with 401/403 by design, and no admin credentials will ever be provided. Never retry or loop on these calls: report the limitation clearly and complete the task from data the user-level APIs can see (for example the user\'s own Drive file metadata and sharing settings).' + nl +
     '- CHAT SPACES: when the task names a Chat space, search for it first; if no space with that name exists, CREATE the space with that exact name via the gws CLI and then post there (demo environments often lack the space - creating it is expected, not an error). State in your report that you created it. If creation fails (e.g. missing permission), report the failure instead of posting elsewhere.' + nl +
     '- EMAIL ENCODING: non-ASCII email headers (Subject, display names) MUST be RFC 2047 MIME-encoded (for example =?UTF-8?B?...?=). After creating a draft, read it back and verify the subject decodes correctly; delete and recreate it if it is garbled.' + nl +
     '- REPORTING DRAFTS: when you create a Gmail draft, your report must state it ALREADY EXISTS in the user Gmail Drafts folder, with the draft subject and this link: https://mail.google.com/mail/u/0/#drafts - never paste the full email body into the report for manual copying.' + nl +
-    '- If no WORKSPACE ACCESS section is present, you have no Workspace access for this task - say so in the report instead of guessing.' + nl + nl) : '') +
+    '- If no WORKSPACE ACCESS section is present, you have no Workspace access for this task - say so in the report instead of guessing.' + nl + nl) : (
+    'WORKSPACE LIMITS' + nl +
+    '- This environment has NO Google Workspace access: no WORKSPACE ACCESS section or credentials will ever be provided, and interactive OAuth flows CANNOT complete here. Do NOT install, authenticate, or wait on the gws CLI (or any Workspace / Admin SDK API) - authentication will block forever.' + nl +
+    '- If a task asks for Workspace operations (Gmail, Chat, Calendar, Drive, or user directory / security group / permission audits), state this limitation prominently in your report, then complete every remaining part of the task that the provided data tools DO support (BigQuery, Firestore, web research, file deliverables) and deliver those results. Never stall on the missing access.' + nl + nl)) +
     'QUALITY GATE (before ANY upload)' + nl +
     '- Run the Verification checklist of the SKILL.md you followed against the finished file. If any check fails, fix and REBUILD - at least one review-and-revise pass is mandatory even when everything looks fine.' + nl +
     '- The bar is board-ready: real numbers from the actual data, sources with URLs for every external claim, assertion-style headings that state the finding, zero placeholder text or lorem ipsum, consistent fonts and colors, and no garbled non-ASCII text (open the built file and check rendered strings, not just your source).' + nl + nl +
@@ -2002,7 +2257,7 @@ function buildManagedAgentInstruction_(businessInstruction, datasetId, fsCollect
 }
 
 function generateSetupScript(params) {
-  const { datasetId, systemInstruction, businessInstruction, referenceDate, publicDatasetId, suffix, tables, firestore, userGoal, dirName, agentShortName, oneSentenceSummary, enableWorkspaceMcp, enableComputerUse, enableManagedAgent, enableWorkspaceAuth, metadata } = params;
+  const { datasetId, systemInstruction, businessInstruction, referenceDate, publicDatasetId, suffix, tables, firestore, userGoal, dirName, agentShortName, oneSentenceSummary, operatingModel, enableWorkspaceMcp, enableComputerUse, enableManagedAgent, enableWorkspaceAuth, metadata } = params;
 
   // Derived feature gates (see AGENTS.md section 14):
   // - workspaceAuthEnabled: the GE OAuth authorization (user token) exists.
@@ -2011,6 +2266,10 @@ function generateSetupScript(params) {
   //   Workspace (Drive save + gws CLI actions) - needs BOTH capabilities.
   const workspaceAuthEnabled = !!(enableWorkspaceMcp || enableWorkspaceAuth);
   const driveHandoffEnabled = !!(enableManagedAgent && workspaceAuthEnabled);
+  // - preBrowseEnabled: composite tasks can be delegated with live browser
+  //   findings gathered by the root agent BEFORE delegation (pre-browse) -
+  //   needs BOTH the browser tooling and the autonomous agent.
+  const preBrowseEnabled = !!(enableManagedAgent && enableComputerUse);
 
   // ── Deduplicate importedMcpList by github_url ──
   // When the same MCP repo appears multiple times (e.g. from catalog + URL import),
@@ -2049,23 +2308,45 @@ function generateSetupScript(params) {
   const safeShortName = bashEscape(agentShortName) || 'Agent';
   const safeSummary = bashEscape(oneSentenceSummary) || 'A2A Agent';
 
-  // Generation-time reachability check for the pinned agent-template ref.
-  // Surfaces a banner in the generated script (visible in the UI preview)
-  // instead of letting the customer's Cloud Shell discover a dead ref later.
+  // Agent-template ref: generation-time resolution + reachability check.
+  // A branch-name TEMPLATE_REF (the committed default is 'main') is resolved
+  // HERE to a concrete commit SHA and that SHA is baked into the generated
+  // script, keeping every script reproducible while the repo never has to
+  // commit its own merge SHA. A 40-hex TEMPLATE_REF (Script Property)
+  // hard-pins and skips resolution. On API failure the script falls back to
+  // fetching the ref as written (a branch fetch still works - it just tracks
+  // the tip), and a banner in the script preview explains what happened.
+  let templateRef = CONFIG.TEMPLATE_REF;
   let templateRefBanner = '';
   try {
     const repoMatch = CONFIG.TEMPLATE_REPO.match(/github\.com[:\/]([^\/]+\/[^\/.]+)/);
     if (repoMatch) {
+      const refIsSha = /^[0-9a-f]{40}$/i.test(templateRef);
       const refResp = UrlFetchApp.fetch(
-        'https://api.github.com/repos/' + repoMatch[1] + '/commits/' + encodeURIComponent(CONFIG.TEMPLATE_REF),
-        { muteHttpExceptions: true });
-      if (refResp.getResponseCode() !== 200) {
+        'https://api.github.com/repos/' + repoMatch[1] + '/commits/' + encodeURIComponent(templateRef),
+        { muteHttpExceptions: true, headers: getGithubHeaders() });
+      if (refResp.getResponseCode() === 200) {
+        if (!refIsSha) {
+          const resolvedSha = (JSON.parse(refResp.getContentText()) || {}).sha;
+          if (/^[0-9a-f]{40}$/i.test(resolvedSha || '')) {
+            templateRef = resolvedSha;
+          }
+        }
+      } else if (refIsSha) {
         templateRefBanner = '# =========================================================\n' +
           '# WARNING (generation-time check): agent-template ref\n' +
-          '#   ' + CONFIG.TEMPLATE_REF + '\n' +
+          '#   ' + templateRef + '\n' +
           '# was NOT reachable in ' + CONFIG.TEMPLATE_REPO + '\n' +
           '# when this script was generated. The template fetch below will\n' +
           '# likely fail. Update the TEMPLATE_REF Script Property and regenerate.\n' +
+          '# =========================================================\n\n';
+      } else {
+        templateRefBanner = '# =========================================================\n' +
+          '# NOTE (generation-time check): the agent-template ref \'' + templateRef + '\'\n' +
+          '# could not be resolved to a commit SHA when this script was\n' +
+          '# generated (GitHub API unreachable or rate-limited). The fetch\n' +
+          '# below will track the CURRENT TIP of that ref instead of a fixed\n' +
+          '# commit. Regenerate later for a fully pinned script.\n' +
           '# =========================================================\n\n';
       }
     }
@@ -2081,25 +2362,66 @@ function generateSetupScript(params) {
     //   Constraint: a2ui@ade478f requires google-genai>=1.27.0, google-adk>=1.28.1
     a2ui: 'a2ui-agent-sdk @ git+https://github.com/google/A2UI.git@ade478faf8dcad611b5efb6b864dcbfbc4a51f68#subdirectory=agent_sdks/python',
 
-    // Python SDKs -- floor-only (>=) to avoid pip resolution conflicts
-    // Upper bounds are NOT set unless a package has caused a breaking change.
-    adk: 'google-adk[a2a]>=1.31.1',
-    mcp: 'mcp>=1.24.0',
-    genai: 'google-genai>=1.27.0',
-    a2a: 'a2a-sdk>=0.2.0,<1.0.0',
+    // == MAJOR-CAP POLICY (v11.39) ==
+    // EVERY pip requirement below carries an upper bound at the next major.
+    // The old policy ("upper bounds are NOT set unless a package has caused a
+    // breaking change") is what let mcp 2.0.0 into a build the day it shipped
+    // and crash every container at import -- see AGENTS.md section 8.
+    // Rationale: these demos are built live, minutes before a customer meeting.
+    // A cap turns an unpredictable upstream break into a predictable freeze we
+    // lift on our own schedule. Never remove a cap without a full smoke deploy.
+    //
+    // Caps are placed at the next major ABOVE THE CURRENTLY RESOLVED version,
+    // not above the floor. Where the two differ (adk 1->2, genai 1->2,
+    // storage 2->3) the band deliberately spans both majors: the resolver
+    // needs that room to backtrack, which is load-bearing for the non-
+    // computer-use build path (see the cuOtelGcp* comment below).
+    //
+    // Run `python3 check_deps.py` to see floor / cap / resolved / latest and
+    // which caps have gone stale.
+    adk: 'google-adk[a2a]>=1.31.1,<3.0.0',
+    // mcp <2.0.0 cap (v11.39): mcp 2.0.0 (2026-07-28) removed mcp.shared.session,
+    // which google-adk still imports (mcp_toolset.py: from mcp.shared.session
+    // import ProgressFnT) -> container crashes at import with ModuleNotFoundError.
+    // google-adk declares mcp<2,>=1.24 itself, but only under the mcp/all/test
+    // extras -- we install google-adk[a2a], so that cap never applies and our
+    // floor-only line resolved to 2.0.0. Keep the cap until ADK supports mcp 2.x.
+    mcp: 'mcp>=1.24.0,<2.0.0',
+    genai: 'google-genai>=1.27.0,<3.0.0',
+    // a2a-sdk <0.4.0 (v11.41). google-adk 2.5.0 (2026-07-16) widened its own
+    // bound from `a2a-sdk<0.4` to `a2a-sdk<2`, which let a2a-sdk 1.x into the
+    // build for the first time. a2a-sdk 1.x is not backward compatible and
+    // breaks three things at once:
+    //   a2a.types.DataPart                    removed -> a2ui@ade478f fails to
+    //                                         import (the Dockerfile's a2ui
+    //                                         interface check catches this)
+    //   a2a.server.apps                       removed -> fast_api_app.py cannot
+    //                                         import A2AFastAPIApplication
+    //   a2a.utils.constants.EXTENDED_AGENT_CARD_PATH  removed
+    // Verified 2026-07-29 against a2a-sdk 1.1.2. adk 2.5.0 still runs fine on
+    // a2a-sdk 0.3.26, so the cap contains a2a without holding back adk.
+    //
+    // v11.39 wrote <2.0.0 here on the reasoning that 1.1.2 was already
+    // resolving and a 1.x cap would be a "silent downgrade". That was backwards:
+    // the downgrade to 0.3.26 is the CORRECT outcome, because 1.x does not work
+    // at all. "Already resolving" is not evidence that a version works -- only
+    // a build that passes is. See AGENTS.md section 8.1.
+    a2a: 'a2a-sdk>=0.3.4,<0.4.0',
 
-    // Google Cloud SDKs -- stable, floor-only
-    aiplatform: 'google-cloud-aiplatform[agent_engines]>=1.112.0',
-    storage: 'google-cloud-storage>=2.14.0',
-    scheduler: 'google-cloud-scheduler>=2.0.0',
-    pubsub: 'google-cloud-pubsub>=2.0.0',
-    firestore: 'google-cloud-firestore>=2.16.0',
-    logging: 'google-cloud-logging>=3.0.0',
+    // Google Cloud SDKs -- stable, but majors do land (storage crossed 2.x -> 3.x
+    // unnoticed under the old floor-only policy).
+    aiplatform: 'google-cloud-aiplatform[agent_engines]>=1.112.0,<2.0.0',
+    storage: 'google-cloud-storage>=2.14.0,<4.0.0',
+    scheduler: 'google-cloud-scheduler>=2.0.0,<3.0.0',
+    tasks: 'google-cloud-tasks>=2.13.0,<3.0.0',
+    pubsub: 'google-cloud-pubsub>=2.0.0,<3.0.0',
+    firestore: 'google-cloud-firestore>=2.16.0,<3.0.0',
+    logging: 'google-cloud-logging>=3.0.0,<4.0.0',
 
-    // Utilities -- floor-only
-    dotenv: 'python-dotenv>=1.0.0',
-    dbDtypes: 'db-dtypes>=1.0.0',
-    otel: 'opentelemetry-api>=1.20.0',
+    // Utilities
+    dotenv: 'python-dotenv>=1.0.0,<2.0.0',
+    dbDtypes: 'db-dtypes>=1.0.0,<2.0.0',
+    otel: 'opentelemetry-api>=1.20.0,<2.0.0',
 
     // Build tools -- exact pin (infrastructure, not pip-resolved)
     pythonImage: 'python:3.11.12-slim',
@@ -2107,10 +2429,10 @@ function generateSetupScript(params) {
     uvVersion: '0.11.17',
     supergateway: 'supergateway@3.4.3',
 
-    // Viewer app -- floor-only
-    viewerFunctionsFramework: 'functions-framework>=3.5.0',
-    viewerFlask: 'flask>=3.0.3',
-    viewerFirestore: 'google-cloud-firestore>=2.16.0',
+    // Viewer app
+    viewerFunctionsFramework: 'functions-framework>=3.5.0,<4.0.0',
+    viewerFlask: 'flask>=3.0.3,<4.0.0',
+    viewerFirestore: 'google-cloud-firestore>=2.16.0,<3.0.0',
 
     // Computer Use (browser agent) -- only added when enableComputerUse is set.
     // playwright pin matches the official reference impl
@@ -2118,10 +2440,65 @@ function generateSetupScript(params) {
     // to the version exposing types.ComputerUse/types.Environment for the
     // generate_content computer_use tool config.
     playwright: 'playwright==1.55.0',
-    genaiComputerUse: 'google-genai>=2.7.0',
+    genaiComputerUse: 'google-genai>=2.7.0,<3.0.0',
+    // (v11.36) google-genai>=2.7.0 is only satisfiable with recent
+    // google-cloud-aiplatform releases (older ones cap google-genai<2.0.0),
+    // and those releases depend on Google Cloud OTel packages whose satisfying
+    // versions are pre-releases (1.12.0a0). uv ignores pre-release markers
+    // on TRANSITIVE deps, so without these direct floors the resolver
+    // rejects every aiplatform that allows genai 2.x and the build fails
+    // ("pre-releases weren't enabled"). Declaring them as direct deps with
+    // explicit pre-release floors scopes pre-release resolution to exactly
+    // these two packages (unlike --prerelease=allow, which would also pull
+    // mcp/pydantic pre-releases).
+    cuOtelGcpLogging: 'opentelemetry-exporter-gcp-logging>=1.12.0a0,<2.0.0',
+    cuOtelGcpResourceDetector: 'opentelemetry-resourcedetector-gcp>=1.12.0a0,<2.0.0',
   };
 
-  
+  // == constraints.txt (v11.40) ==
+  // Caps in requirements.txt only bind the install WE issue. Cloned custom MCP
+  // server repos run their own `uv pip install` inside the same image (see the
+  // __DOCKER_MCP_INSTALL_*__ layers), and an `mcp>=2` pinned in someone else's
+  // requirements.txt would upgrade straight past our cap and reintroduce the
+  // exact ModuleNotFoundError the cap exists to prevent -- in a layer we do not
+  // control and did not write. Passing -c makes the caps apply image-wide.
+  //
+  // UPPER BOUNDS ONLY. A floor in a constraints file can force an upgrade --
+  // including into a pre-release, the trap the cuOtelGcp* comment above
+  // describes -- inside a resolution we are not steering. A cap can only ever
+  // prevent one, so the file is purely protective and cannot make a
+  // third-party install fail in a way our own build would not. Dropping the
+  // floors also collapses the two
+  // google-genai entries (>=1.27.0 and the computer-use >=2.7.0) to one line;
+  // duplicate names in a constraints file are a hard error for pip.
+  //
+  // Constraint files may not carry extras or direct references, so the a2ui git
+  // pin is excluded and `[a2a]` / `[agent_engines]` are stripped. A constraint
+  // on a package that is never installed is a no-op, so listing the
+  // computer-use entries unconditionally is safe and keeps the file identical
+  // across feature-flag combinations.
+  const CONSTRAINT_KEYS = [
+    'adk', 'mcp', 'genai', 'a2a', 'aiplatform', 'storage', 'scheduler',
+    'tasks', 'pubsub', 'firestore', 'logging', 'dotenv', 'dbDtypes', 'otel',
+    'playwright', 'genaiComputerUse', 'cuOtelGcpLogging', 'cuOtelGcpResourceDetector',
+  ];
+  const constraintLines = [];
+  CONSTRAINT_KEYS.forEach(key => {
+    const spec = PINNED_DEPS[key];
+    if (!spec || spec.indexOf(' @ ') !== -1) return;
+    const parsed = spec.match(/^([A-Za-z0-9._-]+)(?:\[[^\]]*\])?(.*)$/);
+    if (!parsed) return;
+    const name = parsed[1];
+    const bounds = (parsed[2] || '').split(',')
+      .map(part => part.trim())
+      .filter(part => part.charAt(0) === '<' || part.substring(0, 2) === '==');
+    if (!bounds.length) return;
+    if (constraintLines.some(line => line.name === name)) return;
+    constraintLines.push({ name: name, text: name + bounds.join(',') });
+  });
+  const constraintsTxt = constraintLines.map(line => line.text).join('\n');
+
+
   const escapedInstruction = systemInstruction
     .replace(/\\/g, '\\\\\\\\')
     .replace(/'/g, "'\\''")
@@ -2141,7 +2518,7 @@ function generateSetupScript(params) {
     : '';
   const managedAgentId = (dirName + '-auto').toLowerCase().replace(/[^a-z0-9-]/g, '-').substring(0, 63).replace(/-+$/, '');
   const managedAgentInstruction = enableManagedAgent
-    ? buildManagedAgentInstruction_(businessInstruction || '', datasetId, fsCollection, true, workspaceAuthEnabled)
+    ? buildManagedAgentInstruction_(businessInstruction || '', datasetId, fsCollection, true, workspaceAuthEnabled, preBrowseEnabled, operatingModel || '')
     : '';
 
   // Build local BQ creation commands
@@ -2155,7 +2532,11 @@ function generateSetupScript(params) {
   bqCommands += `SCHEMA=\$3\n`;
   bqCommands += `DATASET=\$4\n`;
   bqCommands += `echo "📥 Loading \$TABLE..."\n`;
-  bqCommands += `if bq load --source_format=CSV --skip_leading_rows=1 --allow_quoted_newlines --null_marker="" --quote='"' --encoding=UTF-8 --max_bad_records=5 --location=US "\$DATASET.\$TABLE" "\$CSV" "\$SCHEMA"; then\n`;
+  // --replace (v11.35): a re-run of the same setup script must not APPEND the
+  // same rows again (observed live: every full re-run doubled every table).
+  // The CSVs are embedded in this script, so replacing the table is always
+  // the correct idempotent behavior.
+  bqCommands += `if bq load --replace --source_format=CSV --skip_leading_rows=1 --allow_quoted_newlines --null_marker="" --quote='"' --encoding=UTF-8 --max_bad_records=5 --location=US "\$DATASET.\$TABLE" "\$CSV" "\$SCHEMA"; then\n`;
   bqCommands += `  echo "    ✅ Loaded table: \$TABLE"\n`;
   bqCommands += `else\n`;
   bqCommands += `  echo "    ⚠️  ERROR: Failed to load table: \$TABLE"\n`;
@@ -2244,7 +2625,7 @@ if __name__ == '__main__':
     init_data()
 __PY_EOF__\n`;
 
-    firestoreCommands += `uv run --with google-cloud-firestore python setup_fs.py\n`;
+    firestoreCommands += `uv run --no-project --with "${PINNED_DEPS.firestore}" python setup_fs.py\n`;
     firestoreCommands += `rm setup_fs.py\n\n`;
 
     firestoreCommands += `echo "🌐 Deploying Real-time Data Viewer Web App (Cloud Run Functions)..."\n`;
@@ -2303,11 +2684,21 @@ Requirements:
     firestoreCommands += `cp "$GE_TPL/viewer_app/requirements.txt" ${dirName}/viewer_app/requirements.txt\n`;
 
     firestoreCommands += `echo "🌐 Checking/Deploying Real-time Data Viewer Web App..."\n`;
+    // v11.35: ALWAYS deploy. The old exists->skip fast path meant viewer code
+    // updates never reached a re-deployed demo (Cloud Run agent updated, viewer
+    // stale). gcloud functions deploy is an idempotent update-in-place for an
+    // existing function, so re-running is safe - it just costs the build time.
     firestoreCommands += `if gcloud functions describe ${dirName}-viewer --gen2 --region=us-central1 --project="$PROJECT_ID" >/dev/null 2>&1; then\n`;
-    firestoreCommands += `  echo "    ✅ Cloud Run Function already exists."\n`;
+    firestoreCommands += `  echo "    ♻️  Function exists - redeploying to apply the latest viewer code (update-in-place)..."\n`;
     firestoreCommands += `else\n`;
+    firestoreCommands += `  echo "    🚀 Deploying new Data Viewer function..."\n`;
+    firestoreCommands += `fi\n`;
+    firestoreCommands += `if true; then\n`;
     firestoreCommands += `  VIEWER_LOG=\$(mktemp /tmp/viewer-deploy-XXXXXX.log)\n`;
-    firestoreCommands += `  gcloud functions deploy ${dirName}-viewer --gen2 --runtime=python311 --region=us-central1 --source=${dirName}/viewer_app --entry-point=main --trigger-http --allow-unauthenticated --set-env-vars=DEMO_ID=${dirName} --project="$PROJECT_ID" > "\$VIEWER_LOG" 2>&1 &\n`;
+    // v11.12: --no-allow-unauthenticated + IAP (see the IAP block below). Never
+    // grants allUsers, so the deploy works under Domain Restricted Sharing org
+    // policies and demo data is never exposed on a public URL.
+    firestoreCommands += `  gcloud functions deploy ${dirName}-viewer --gen2 --runtime=python311 --region=us-central1 --source=${dirName}/viewer_app --entry-point=main --trigger-http --no-allow-unauthenticated --set-env-vars=DEMO_ID=${dirName} --project="$PROJECT_ID" > "\$VIEWER_LOG" 2>&1 &\n`;
     firestoreCommands += `  VIEWER_PID=\$!\n`;
     firestoreCommands += `  printf "    ⏳ Deploying Data Viewer"\n`;
     firestoreCommands += `  while kill -0 \$VIEWER_PID 2>/dev/null; do\n`;
@@ -2315,15 +2706,31 @@ Requirements:
     firestoreCommands += `    sleep 5\n`;
     firestoreCommands += `  done\n`;
     firestoreCommands += `  echo ""\n`;
-    firestoreCommands += `  wait \$VIEWER_PID || true\n`;
-    // NOTE: don't trust the exit code here — the deploy runs in the background and
-    // `wait ... || true` always yields 0. Verify the function actually exists instead
-    // (same source of truth as the final summary), so we never print a false success.
-    firestoreCommands += `  if gcloud functions describe ${dirName}-viewer --gen2 --region=us-central1 --project="$PROJECT_ID" >/dev/null 2>&1; then\n`;
-    firestoreCommands += `    echo "    ✅ Cloud Run Function deployed."\n`;
+    firestoreCommands += `  VIEWER_RC=0\n`;
+    firestoreCommands += `  wait \$VIEWER_PID || VIEWER_RC=\$?\n`;
+    // v11.35: wait's status IS the deploy's exit code - required now that
+    // re-runs redeploy an EXISTING function (describe alone would report a
+    // false success when the update failed but the old function remains).
+    // The describe check stays as the fresh-deploy source of truth.
+    firestoreCommands += `  if [ "\$VIEWER_RC" = "0" ] && gcloud functions describe ${dirName}-viewer --gen2 --region=us-central1 --project="$PROJECT_ID" >/dev/null 2>&1; then\n`;
+    firestoreCommands += `    echo "    ✅ Data Viewer deployed (latest viewer code active)."\n`;
     firestoreCommands += `  else\n`;
     firestoreCommands += `    echo "    ⚠️ WARNING: Failed to deploy Firestore Data Viewer. Build log:"\n`;
     firestoreCommands += `    cat "\$VIEWER_LOG"\n`;
+    // v11.14: orgs commonly restrict constraints/run.allowedIngress to
+    // internal(-and-gclb), which rejects the CreateService call before IAP is
+    // even relevant. NON-INTERACTIVE by design: most operators cannot change
+    // org policies, and a mid-script prompt would stall unattended runs. We
+    // only explain the cause and print the manual remedy for operators who
+    // DO hold org-policy admin, then continue without the viewer.
+    firestoreCommands += `    if grep -q "run.allowedIngress" "\$VIEWER_LOG"; then\n`;
+    firestoreCommands += `      echo ""\n`;
+    firestoreCommands += `      echo "    🚧 Cause: org policy 'constraints/run.allowedIngress' does not allow public ingress, which the browser-based Data Viewer needs."\n`;
+    firestoreCommands += `      echo "       The Data Viewer is skipped in this environment. If you hold Organization Policy Administrator on this project"\n`;
+    firestoreCommands += `      echo "       you can allow it and re-run this script:"\n`;
+    firestoreCommands += `      echo "         gcloud resource-manager org-policies allow constraints/run.allowedIngress all --project=$PROJECT_ID"\n`;
+    firestoreCommands += `      echo "       (Viewer access itself stays IAP-protected - it is never public even with ingress allowed.)"\n`;
+    firestoreCommands += `    fi\n`;
     firestoreCommands += `    echo "    ℹ️  This is an optional component and does NOT affect the agent's functionality."\n`;
     firestoreCommands += `    echo "    ℹ️  The agent will work normally without the Data Viewer."\n`;
     firestoreCommands += `  fi\n`;
@@ -2335,6 +2742,42 @@ Requirements:
     firestoreCommands += `  VIEWER_URL=$(gcloud functions describe ${dirName}-viewer --gen2 --region=us-central1 --format="value(serviceConfig.uri)" --project="$PROJECT_ID")\n`;
     firestoreCommands += `else\n`;
     firestoreCommands += `  VIEWER_DEPLOYED=false\n`;
+    firestoreCommands += `fi\n`;
+    // Always-on IAP (v11.12): the viewer is deployed WITHOUT public access, so
+    // enable Cloud Run IAP and grant the deploying user. Runs for both fresh and
+    // pre-existing deployments (idempotent). Fail-soft: if IAP cannot be enabled
+    // the viewer stays unreachable, so we drop it (agent works without it).
+    firestoreCommands += `if [ "$VIEWER_DEPLOYED" = "true" ]; then\n`;
+    firestoreCommands += `  echo "    🔐 Enabling IAP on the Data Viewer (no public access)..."\n`;
+    firestoreCommands += `  PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")\n`;
+    firestoreCommands += `  gcloud beta services identity create --service=iap.googleapis.com --project="$PROJECT_ID" >/dev/null 2>&1 || true\n`;
+    firestoreCommands += `  IAP_SA="service-$PROJECT_NUMBER@gcp-sa-iap.iam.gserviceaccount.com"\n`;
+    firestoreCommands += `  gcloud run services add-iam-policy-binding ${dirName}-viewer --region=us-central1 --member="serviceAccount:$IAP_SA" --role="roles/run.invoker" --project="$PROJECT_ID" >/dev/null 2>&1 || true\n`;
+    firestoreCommands += `  VIEWER_IAP_OK=false\n`;
+    firestoreCommands += `  _IAP_ERR=""\n`;
+    firestoreCommands += `  for _IAP_TRY in 1 2 3; do\n`;
+    firestoreCommands += `    if _IAP_ERR=$(gcloud beta run services update ${dirName}-viewer --region=us-central1 --iap --project="$PROJECT_ID" 2>&1); then\n`;
+    firestoreCommands += `      VIEWER_IAP_OK=true\n`;
+    firestoreCommands += `      break\n`;
+    firestoreCommands += `    fi\n`;
+    firestoreCommands += `    sleep 10\n`;
+    firestoreCommands += `  done\n`;
+    firestoreCommands += `  DEPLOYER_EMAIL=$(gcloud config get-value account 2>/dev/null)\n`;
+    firestoreCommands += `  if [ "$VIEWER_IAP_OK" = "true" ]; then\n`;
+    firestoreCommands += `    if [ -n "$DEPLOYER_EMAIL" ]; then\n`;
+    firestoreCommands += `      gcloud beta iap web add-iam-policy-binding --project="$PROJECT_ID" --resource-type=cloud-run --region=us-central1 --service=${dirName}-viewer --member="user:$DEPLOYER_EMAIL" --role="roles/iap.httpsResourceAccessor" >/dev/null 2>&1 || true\n`;
+    firestoreCommands += `    fi\n`;
+    firestoreCommands += `    echo "    ✅ IAP enabled. Viewer access granted to: $DEPLOYER_EMAIL"\n`;
+    firestoreCommands += `    echo "    ℹ️  Open the viewer once in your browser before the demo to complete sign-in."\n`;
+    firestoreCommands += `    echo "    ℹ️  Grant more viewers with:"\n`;
+    firestoreCommands += `    echo "        gcloud beta iap web add-iam-policy-binding --project=$PROJECT_ID --resource-type=cloud-run --region=us-central1 --service=${dirName}-viewer --member=user:EMAIL --role=roles/iap.httpsResourceAccessor"\n`;
+    firestoreCommands += `  else\n`;
+    firestoreCommands += `    echo "    ⚠️ WARNING: Could not enable IAP on the Data Viewer; it would be unreachable, so it is disabled."\n`;
+    firestoreCommands += `    echo "    ℹ️  Last gcloud error was:"\n`;
+    firestoreCommands += `    echo "\$_IAP_ERR" | tail -n 3 | sed 's/^/       /'\n`;
+    firestoreCommands += `    echo "    ℹ️  The agent works normally without the Data Viewer."\n`;
+    firestoreCommands += `    VIEWER_DEPLOYED=false\n`;
+    firestoreCommands += `  fi\n`;
     firestoreCommands += `fi\n\n`;
   }
 
@@ -2347,7 +2790,20 @@ Requirements:
   const geLocalMcps = (params.importedMcpList || []).filter(m => m.type !== 'remote');
   const geMcpConfigJson = JSON.stringify({ mcpServers: (params.importedMcpList || []).map((mcp, geIdx) => {
     if (mcp.type === 'remote') {
-      return { idx: geIdx, type: 'remote', name: mcp.name || '', auth_type: mcp.auth_type || '' };
+      // Everything the static template needs for a managed remote server is
+      // precomputed here (slug, env var, secret name) so tools.py and agent.py
+      // stay free of per-demo logic — same contract as the local entries below.
+      const geIsGeneric = remoteMcpIsGeneric_(mcp);
+      return {
+        idx: geIdx, type: 'remote', name: mcp.name || '', auth_type: mcp.auth_type || '',
+        endpoint_url: mcp.endpoint_url || '',
+        description: String(mcp.description || '').replace(/\s+/g, ' ').trim(),
+        capabilities: (mcp.capabilities || []).slice(0, 12),
+        generic: geIsGeneric,
+        prefix: geIsGeneric ? remoteMcpSlug_(mcp, geIdx).replace(/-/g, '_') : '',
+        env_key: (geIsGeneric && remoteMcpUsesAuthBlob_(mcp)) ? remoteMcpEnvKey_(mcp, geIdx) : '',
+        secret: (geIsGeneric && remoteMcpUsesAuthBlob_(mcp)) ? remoteMcpSecretName_(dirName, mcp, geIdx) : ''
+      };
     }
     const geLocalIdx = geLocals_indexOf(geLocalMcps, mcp);
     return {
@@ -2517,18 +2973,201 @@ fi
 
 echo "  ✅ Slack MCP OAuth configured!"
 `;
-        } else {
-          // Generic remote MCP: prompt for env vars normally
-          mcp.required_env_vars.forEach(v => {
-            if (v.is_required) {
-              if (v.is_secret) {
-                mcpReads += `while true; do\n  read -s -p "▶ Enter ${v.key} (${v.description}): " ${v.key}\n  echo ""\n  if [ -n "$${v.key}" ]; then break; fi\n  echo "  ⚠️  ${v.key} is required. Please enter a value."\ndone\n`;
-              } else {
-                mcpReads += `while true; do\n  read -p "▶ Enter ${v.key} (${v.description}): " ${v.key}\n  if [ -n "$${v.key}" ]; then break; fi\n  echo "  ⚠️  ${v.key} is required. Please enter a value."\ndone\n`;
-              }
-            }
-          });
+        } else if (mcp.auth_type === 'oauth2_dcr' || mcp.auth_type === 'oauth2_manual') {
+          // ── Generic managed remote MCP: standards-based OAuth (v11.46) ──
+          // RFC 9728 discovery -> RFC 8414 metadata -> RFC 7591 dynamic client
+          // registration (skipped when the server has no registration_endpoint,
+          // in which case the operator supplies a client they registered) ->
+          // RFC 7636 PKCE authorization code, pasted back from the browser the
+          // same way the Slack flow above does it. The resulting tokens are
+          // stored as one JSON blob so the agent can refresh them at runtime.
+          const rmName = String(mcp.name || 'Remote MCP').replace(/["$\\]/g, '').split(String.fromCharCode(96)).join('');
+          const rmSecret = remoteMcpSecretName_(dirName, mcp, mcpIdx);
+          mcpReads += `
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo "  🔐 ${rmName} MCP Server — OAuth Setup"
+echo "════════════════════════════════════════════════════════════"
+echo ""
+RMCP_URL="${mcp.endpoint_url}"
+RMCP_SECRET="${rmSecret}"
+RMCP_CLIENT_NAME="GE Demo (${dirName})"
+RMCP_REDIRECT="https://localhost"
+RMCP_CLIENT_ID=""
+RMCP_CLIENT_SECRET=""
+RMCP_SKIP=false
+
+# Defensive: this block reads/writes Secret Manager, so ensure the API is on
+# even if it ever runs before the main API-enable batch. Idempotent.
+gcloud services enable secretmanager.googleapis.com --project="$PROJECT_ID" 2>/dev/null || true
+
+if gcloud secrets describe "$RMCP_SECRET" --project="$PROJECT_ID" >/dev/null 2>&1; then
+  echo "  ✅ Found existing ${rmName} credentials in Secret Manager."
+  read -p "  Reuse them and skip authorization? (Y/n): " RMCP_REUSE
+  if [[ ! "$RMCP_REUSE" =~ ^[Nn] ]]; then
+    RMCP_SKIP=true
+    echo "  ⏭️  Reusing stored credentials."
+  fi
+fi
+
+if [ "$RMCP_SKIP" = "false" ]; then
+  RMCP_ORIGIN=$(echo "$RMCP_URL" | sed -E 's#^(https://[^/]+).*#\\1#')
+  RMCP_PATH=$(echo "$RMCP_URL" | sed -E 's#^https://[^/]+##')
+
+  echo "  🔎 Discovering OAuth endpoints for $RMCP_URL ..."
+  RMCP_AS=$(curl -s -m 20 "$RMCP_ORIGIN/.well-known/oauth-protected-resource$RMCP_PATH" | jq -r '.authorization_servers[0] // empty') || true
+  if [ -z "$RMCP_AS" ]; then
+    RMCP_AS=$(curl -s -m 20 "$RMCP_ORIGIN/.well-known/oauth-protected-resource" | jq -r '.authorization_servers[0] // empty') || true
+  fi
+  if [ -z "$RMCP_AS" ]; then RMCP_AS="$RMCP_ORIGIN"; fi
+  RMCP_AS="\${RMCP_AS%/}"
+
+  RMCP_META=$(curl -s -m 20 "$RMCP_AS/.well-known/oauth-authorization-server$RMCP_PATH") || true
+  if [ -z "$(echo "$RMCP_META" | jq -r '.token_endpoint // empty' 2>/dev/null)" ]; then
+    RMCP_META=$(curl -s -m 20 "$RMCP_AS/.well-known/oauth-authorization-server") || true
+  fi
+  if [ -z "$(echo "$RMCP_META" | jq -r '.token_endpoint // empty' 2>/dev/null)" ]; then
+    RMCP_META=$(curl -s -m 20 "$RMCP_AS/.well-known/openid-configuration") || true
+  fi
+  RMCP_AUTH_EP=$(echo "$RMCP_META" | jq -r '.authorization_endpoint // empty' 2>/dev/null) || true
+  RMCP_TOKEN_EP=$(echo "$RMCP_META" | jq -r '.token_endpoint // empty' 2>/dev/null) || true
+  RMCP_REG_EP=$(echo "$RMCP_META" | jq -r '.registration_endpoint // empty' 2>/dev/null) || true
+
+  if [ -z "$RMCP_AUTH_EP" ] || [ -z "$RMCP_TOKEN_EP" ]; then
+    echo "  ❌ Could not discover OAuth endpoints for $RMCP_URL."
+    echo "     Setup continues; the agent will start without ${rmName} tools."
+  else
+    if [ -n "$RMCP_REG_EP" ]; then
+      echo "  📝 Registering an OAuth client automatically (RFC 7591)..."
+      RMCP_REG_BODY=$(jq -n --arg cn "$RMCP_CLIENT_NAME" --arg ru "$RMCP_REDIRECT" '{client_name:$cn,redirect_uris:[$ru],grant_types:["authorization_code","refresh_token"],response_types:["code"],token_endpoint_auth_method:"none"}')
+      RMCP_REG=$(curl -s -m 30 -X POST "$RMCP_REG_EP" -H 'Content-Type: application/json' -d "$RMCP_REG_BODY") || true
+      RMCP_CLIENT_ID=$(echo "$RMCP_REG" | jq -r '.client_id // empty' 2>/dev/null) || true
+      RMCP_CLIENT_SECRET=$(echo "$RMCP_REG" | jq -r '.client_secret // empty' 2>/dev/null) || true
+      if [ -n "$RMCP_CLIENT_ID" ]; then
+        echo "  ✅ Registered client: $RMCP_CLIENT_ID"
+      else
+        echo "  ⚠️  Dynamic registration did not return a client_id."
+        echo "     Response: $RMCP_REG"
+      fi
+    fi
+
+    if [ -z "$RMCP_CLIENT_ID" ]; then
+      echo ""
+      echo "  This server needs an OAuth app that you register yourself."
+      echo "  Create one with redirect URI: $RMCP_REDIRECT"
+      echo ""
+      while true; do
+        read -p "▶ Paste Client ID: " RMCP_CLIENT_ID
+        if [ -n "$RMCP_CLIENT_ID" ]; then break; fi
+      done
+      read -s -p "▶ Paste Client Secret (press Enter if the app is public): " RMCP_CLIENT_SECRET
+      echo ""
+    fi
+
+    RMCP_VERIFIER=$(openssl rand -hex 48)
+    RMCP_CHALLENGE=$(printf '%s' "$RMCP_VERIFIER" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+    RMCP_RED_ENC=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$RMCP_REDIRECT")
+    RMCP_RES_ENC=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$RMCP_URL")
+    RMCP_CID_ENC=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$RMCP_CLIENT_ID")
+    RMCP_AUTH_URL="\${RMCP_AUTH_EP}?response_type=code&client_id=\${RMCP_CID_ENC}&redirect_uri=\${RMCP_RED_ENC}&code_challenge=\${RMCP_CHALLENGE}&code_challenge_method=S256&state=gedemo&resource=\${RMCP_RES_ENC}"
+
+    echo ""
+    echo "  🌐 Open this URL in your browser and approve access:"
+    echo ""
+    echo "  $RMCP_AUTH_URL"
+    echo ""
+    echo "  After approving, the browser lands on a page that fails to load"
+    echo "  (https://localhost/?code=...). That is expected — copy that URL."
+    echo "  If your browser rewrites localhost (Cloud Workstations does), copy"
+    echo "  the address bar contents anyway, or paste just the code= value."
+    echo ""
+    while true; do
+      read -p "▶ Paste the FULL redirected URL here (or just the code): " RMCP_PASTE
+      RMCP_CODE_RAW=$(echo "$RMCP_PASTE" | sed -n 's/.*[?&]code=\\([^&]*\\).*/\\1/p')
+      if [ -z "$RMCP_CODE_RAW" ]; then
+        # Also accept a bare code: no URL punctuation, no whitespace.
+        case "$RMCP_PASTE" in
+          *://*|*" "*|"") ;;
+          *) RMCP_CODE_RAW="$RMCP_PASTE" ;;
+        esac
+      fi
+      if [ -n "$RMCP_CODE_RAW" ]; then
+        # The code is percent-encoded inside the URL (Notion codes contain ':').
+        # curl --data-urlencode would encode it a second time, so decode first.
+        RMCP_CODE=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.unquote(sys.argv[1]))' "$RMCP_CODE_RAW")
+        break
+      fi
+      echo "  ⚠️  No code= parameter found. Paste the whole redirected URL."
+    done
+
+    RMCP_TOKEN_ARGS=(--data-urlencode "grant_type=authorization_code" --data-urlencode "code=$RMCP_CODE" --data-urlencode "redirect_uri=$RMCP_REDIRECT" --data-urlencode "client_id=$RMCP_CLIENT_ID" --data-urlencode "code_verifier=$RMCP_VERIFIER" --data-urlencode "resource=$RMCP_URL")
+    if [ -n "$RMCP_CLIENT_SECRET" ]; then
+      RMCP_TOKEN_ARGS+=(--data-urlencode "client_secret=$RMCP_CLIENT_SECRET")
+    fi
+    RMCP_TOKEN_RES=$(curl -s -m 30 -X POST "$RMCP_TOKEN_EP" -H 'Content-Type: application/x-www-form-urlencoded' "\${RMCP_TOKEN_ARGS[@]}") || true
+    RMCP_ACCESS=$(echo "$RMCP_TOKEN_RES" | jq -r '.access_token // empty' 2>/dev/null) || true
+
+    if [ -z "$RMCP_ACCESS" ]; then
+      echo "  ❌ Token exchange failed: $RMCP_TOKEN_RES"
+      echo "     Setup continues; the agent will start without ${rmName} tools."
+    else
+      RMCP_BLOB=$(jq -n \\
+        --arg at "$RMCP_ACCESS" \\
+        --arg rt "$(echo "$RMCP_TOKEN_RES" | jq -r '.refresh_token // empty' 2>/dev/null)" \\
+        --arg ci "$RMCP_CLIENT_ID" \\
+        --arg cs "$RMCP_CLIENT_SECRET" \\
+        --arg te "$RMCP_TOKEN_EP" \\
+        --arg res "$RMCP_URL" \\
+        --argjson ei "$(echo "$RMCP_TOKEN_RES" | jq -r '.expires_in // 0' 2>/dev/null || echo 0)" \\
+        --argjson ia "$(date +%s)" \\
+        '{access_token:$at,refresh_token:$rt,client_id:$ci,client_secret:$cs,token_endpoint:$te,resource:$res,expires_in:$ei,issued_at:$ia}')
+      echo "💾 Saving ${rmName} credentials to Secret Manager..."
+      if gcloud secrets describe "$RMCP_SECRET" --project="$PROJECT_ID" >/dev/null 2>&1; then
+        echo -n "$RMCP_BLOB" | gcloud secrets versions add "$RMCP_SECRET" --data-file=- --project="$PROJECT_ID"
+      else
+        echo -n "$RMCP_BLOB" | gcloud secrets create "$RMCP_SECRET" --data-file=- --replication-policy="automatic" --project="$PROJECT_ID"
+      fi
+      echo "  ✅ ${rmName} MCP authorized!"
+    fi
+  fi
+fi
+`;
+        } else if (mcp.auth_type === 'bearer_token') {
+          // ── Generic managed remote MCP: static API token ──
+          const rmName = String(mcp.name || 'Remote MCP').replace(/["$\\]/g, '').split(String.fromCharCode(96)).join('');
+          const rmSecret = remoteMcpSecretName_(dirName, mcp, mcpIdx);
+          mcpReads += `
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo "  🔑 ${rmName} MCP Server — API Token"
+echo "════════════════════════════════════════════════════════════"
+echo ""
+RMCP_SECRET="${rmSecret}"
+RMCP_SKIP=false
+gcloud services enable secretmanager.googleapis.com --project="$PROJECT_ID" 2>/dev/null || true
+if gcloud secrets describe "$RMCP_SECRET" --project="$PROJECT_ID" >/dev/null 2>&1; then
+  echo "  ✅ Found an existing ${rmName} token in Secret Manager."
+  read -p "  Reuse it? (Y/n): " RMCP_REUSE
+  if [[ ! "$RMCP_REUSE" =~ ^[Nn] ]]; then RMCP_SKIP=true; fi
+fi
+if [ "$RMCP_SKIP" = "false" ]; then
+  while true; do
+    read -s -p "▶ Paste the ${rmName} API token: " RMCP_TOKEN
+    echo ""
+    if [ -n "$RMCP_TOKEN" ]; then break; fi
+    echo "  ⚠️  A token is required."
+  done
+  RMCP_BLOB=$(jq -n --arg at "$RMCP_TOKEN" '{access_token:$at}')
+  if gcloud secrets describe "$RMCP_SECRET" --project="$PROJECT_ID" >/dev/null 2>&1; then
+    echo -n "$RMCP_BLOB" | gcloud secrets versions add "$RMCP_SECRET" --data-file=- --project="$PROJECT_ID"
+  else
+    echo -n "$RMCP_BLOB" | gcloud secrets create "$RMCP_SECRET" --data-file=- --replication-policy="automatic" --project="$PROJECT_ID"
+  fi
+  echo "  ✅ ${rmName} token stored."
+fi
+`;
         }
+        // auth_type 'none': the endpoint is public, nothing to collect.
         return; // skip sidecar-specific credential_file handling
       }
 
@@ -2772,15 +3411,99 @@ else
   echo "   If Chat posts fail with a permission/configuration error, open 'Configuration' there and set it up (App name: '${enableWorkspaceMcp ? 'Chat MCP' : 'GE Demo Agent'}')."
 fi
 
-# Create authorization resource in Gemini Enterprise
+# ── OAuth credential pre-flight (v11.38) ──────────────────────────────────
+# A rotated or deleted client secret is the #1 cause of the Gemini Enterprise
+# "The agent requires additional authorization for: <demo>-auth" loop. The
+# consent step still succeeds (Google only validates client_id and the
+# redirect URI there), but GE's code->token exchange fails with
+# invalid_client, no token is ever persisted, and every following turn
+# re-prompts - with no error surfaced anywhere in the GE UI.
+# Probing the token endpoint with a throwaway code separates the two cases:
+#   invalid_grant  -> credentials are GOOD (only the fake code was rejected)
+#   invalid_client -> the stored secret no longer matches the OAuth client
+probe_oauth_client() {
+  curl -s -X POST "https://oauth2.googleapis.com/token" \
+    -d client_id="\$OAUTH_CLIENT_ID" \
+    -d client_secret="\$OAUTH_CLIENT_SECRET" \
+    -d code="preflight-probe-not-a-real-code" \
+    -d grant_type="authorization_code" \
+    -d redirect_uri="https://vertexaisearch.cloud.google.com/oauth-redirect"
+}
+echo "🩺 Verifying the OAuth client credentials before wiring them into Gemini Enterprise..."
+if probe_oauth_client | grep -q '"invalid_client"'; then
+  echo "    ❌ Google rejected this client_id/secret pair (invalid_client)."
+  echo "       The stored secret no longer matches the OAuth client - it was rotated or deleted."
+  echo "       Add a NEW secret to the EXISTING client (the client_id and redirect URI stay valid):"
+  echo "       https://console.cloud.google.com/auth/clients/\$OAUTH_CLIENT_ID?project=\$PROJECT_ID"
+  if [ -t 0 ]; then
+    read -s -p "    Paste the NEW OAuth Client Secret (or press [Enter] to skip): " NEW_OAUTH_SECRET
+    echo ""
+    if [ -n "\$NEW_OAUTH_SECRET" ]; then
+      OAUTH_CLIENT_SECRET="\$NEW_OAUTH_SECRET"
+      if probe_oauth_client | grep -q '"invalid_client"'; then
+        echo "    ⚠️  The new secret was rejected too - continuing, but Workspace tools will not work."
+      else
+        echo -n "\$OAUTH_CLIENT_SECRET" | gcloud secrets versions add \$CLIENT_SECRET_SECRET --data-file=- --project="\$PROJECT_ID" >/dev/null
+        echo "    ✅ New secret verified and stored as a new Secret Manager version."
+      fi
+    else
+      echo "    ⚠️  Skipped - Workspace authorization will loop until the secret is fixed."
+    fi
+  else
+    echo "    ⚠️  Non-interactive run - continuing, but Workspace authorization will loop."
+  fi
+else
+  echo "    ✅ OAuth client credentials accepted by Google."
+fi
+
+# Create or UPDATE (v11.35) the authorization resource in Gemini Enterprise.
+# A re-run previously hit a silent 409 and kept the OLD resource, so OAuth
+# scope additions never reached overwrite-deployed demos (stale scopes
+# surface later as confusing 403s in Workspace tools). PATCH keeps the
+# scopes in sync with THIS script version; the resource NAME is unchanged,
+# so the agent binding survives.
 AUTH_ID="${dirName}-auth"
-echo "🔐 Creating authorization resource in Gemini Enterprise..."
-curl -X POST \
+AUTH_PAYLOAD='{ "name": "projects/'"\$PROJECT_ID"'/locations/global/authorizations/'"\$AUTH_ID"'", "serverSideOauth2": { "clientId": "'"\$OAUTH_CLIENT_ID"'", "clientSecret": "'"\$OAUTH_CLIENT_SECRET"'", "authorizationUri": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent&response_type=code&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.compose%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.modify%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.calendarlist.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.events.freebusy%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.events.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.events%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fchat.spaces.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fchat.memberships.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fchat.messages.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fchat.messages.create%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fchat.users.readstate.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdirectory.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.profile%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcontacts.readonly&client_id='"\$OAUTH_CLIENT_ID"'&redirect_uri=https%3A%2F%2Fvertexaisearch.cloud.google.com%2Foauth-redirect", "tokenUri": "https://oauth2.googleapis.com/token" } }'
+echo "🔐 Creating/updating authorization resource in Gemini Enterprise..."
+AUTH_RESP=\$(mktemp /tmp/auth-resp-XXXXXX.json)
+AUTH_HTTP=\$(curl -s -o "\$AUTH_RESP" -w "%{http_code}" -X POST \
   -H "Authorization: Bearer \$TOKEN" \
   -H "Content-Type: application/json" \
   -H "X-Goog-User-Project: \$PROJECT_ID" \
   "https://discoveryengine.googleapis.com/v1alpha/projects/\$PROJECT_ID/locations/global/authorizations?authorizationId=\$AUTH_ID" \
-  -d '{ "name": "projects/'"\$PROJECT_ID"'/locations/global/authorizations/'"\$AUTH_ID"'", "serverSideOauth2": { "clientId": "'"\$OAUTH_CLIENT_ID"'", "clientSecret": "'"\$OAUTH_CLIENT_SECRET"'", "authorizationUri": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent&response_type=code&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.compose%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.modify%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.calendarlist.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.events.freebusy%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.events.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.events%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fchat.spaces.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fchat.memberships.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fchat.messages.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fchat.messages.create%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fchat.users.readstate.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdirectory.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.profile%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcontacts.readonly&client_id='"\$OAUTH_CLIENT_ID"'&redirect_uri=https%3A%2F%2Fvertexaisearch.cloud.google.com%2Foauth-redirect", "tokenUri": "https://oauth2.googleapis.com/token" } }'
+  -d "\$AUTH_PAYLOAD")
+if [ "\$AUTH_HTTP" = "200" ]; then
+  echo "    ✅ Authorization resource created."
+elif [ "\$AUTH_HTTP" = "409" ]; then
+  # updateMask is MANDATORY here (v11.38). Without it this endpoint accepts
+  # the request, answers HTTP 200, and silently changes NOTHING - so every
+  # re-run since v11.35 only *claimed* to refresh scopes and the secret
+  # (observed live 2026-07-27).
+  AUTH_HTTP=\$(curl -s -o "\$AUTH_RESP" -w "%{http_code}" -X PATCH \
+    -H "Authorization: Bearer \$TOKEN" \
+    -H "Content-Type: application/json" \
+    -H "X-Goog-User-Project: \$PROJECT_ID" \
+    "https://discoveryengine.googleapis.com/v1alpha/projects/\$PROJECT_ID/locations/global/authorizations/\$AUTH_ID?updateMask=serverSideOauth2" \
+    -d "\$AUTH_PAYLOAD")
+  if [ "\$AUTH_HTTP" = "200" ]; then
+    # A 200 is not proof the write landed - read the resource back and check
+    # that the full authorizationUri (not a truncated legacy one) is present.
+    if curl -s -H "Authorization: Bearer \$TOKEN" -H "X-Goog-User-Project: \$PROJECT_ID" \
+         "https://discoveryengine.googleapis.com/v1alpha/projects/\$PROJECT_ID/locations/global/authorizations/\$AUTH_ID" \
+         | grep -q "vertexaisearch.cloud.google.com%2Foauth-redirect"; then
+      echo "    ♻️  Authorization already existed - updated in place and verified (OAuth scopes + secret refreshed)."
+    else
+      echo "    ⚠️  Authorization PATCH returned 200 but the resource did not change - re-authorization will loop."
+    fi
+  else
+    echo "    ⚠️  Authorization update failed (HTTP \$AUTH_HTTP) - keeping the existing resource:"
+    cat "\$AUTH_RESP"
+  fi
+else
+  echo "    ⚠️  Authorization creation failed (HTTP \$AUTH_HTTP):"
+  cat "\$AUTH_RESP"
+fi
+rm -f "\$AUTH_RESP"
 
 `;
   }
@@ -2801,9 +3524,9 @@ show_usage() {
   echo ""
   echo "Options:"
   echo "  --model-analysis-agent, -m <MODEL>  Set the deep analysis agent model"
-  echo "                                      (default: gemini-3.5-flash)"
+  echo "                                      (default: gemini-3.6-flash)"
   echo "  --model-root-agent <MODEL>          Set the root orchestration agent model"
-  echo "                                      (default: gemini-3.5-flash)"
+  echo "                                      (default: gemini-3.6-flash)"
   echo "  --cleanup, -c                       Delete all provisioned demo resources"
   echo "  --yes, -y                           Skip confirmation prompts (non-interactive use)"
   echo "  --help, -h                          Show this help message and exit"
@@ -2811,7 +3534,7 @@ show_usage() {
   echo "Examples:"
   echo "  bash $0                                  # Deploy with default models"
   echo "  bash $0 --model-analysis-agent gemini-3.1-pro-preview       # Use a different analysis model"
-  echo "  bash $0 --model-root-agent gemini-3.1-flash-lite            # Use a different root model"
+  echo "  bash $0 --model-root-agent gemini-3.5-flash-lite            # Use a different root model"
   echo "  bash $0 --cleanup                         # Remove all demo resources"
   echo "  bash $0 --cleanup --yes                   # Remove all demo resources without prompting"
   echo ""
@@ -2819,8 +3542,8 @@ show_usage() {
 
 
 # --- Argument Parsing ---
-AGENT_MODEL="gemini-3.5-flash"
-AGENT_MODEL_LITE="gemini-3.5-flash"
+AGENT_MODEL="gemini-3.6-flash"
+AGENT_MODEL_LITE="gemini-3.6-flash"
 ROOT_MODEL_CLI_OVERRIDE=false
 CLEANUP_MODE=false
 AUTO_CONFIRM=false
@@ -2876,6 +3599,16 @@ for tool in jq curl gcloud bq make uv git python3; do
     exit 1
   fi
 done
+
+# git must also be recent enough for the pinned agent-template fetch further
+# down: "git sparse-checkout" arrived in 2.25 and partial clone needs 2.19.
+# Without this gate an old git fails much later, inside the template fetch,
+# where the error is far harder to read.
+if ! git --version | awk '{split(\$3, gv, "."); exit !(gv[1] > 2 || (gv[1] == 2 && gv[2] >= 25))}'; then
+  echo "❌ Error: git \$(git --version | awk '{print \$3}') is too old; 2.25 or newer is required."
+  echo "   Cloud Shell is the supported environment for this script and ships a recent git."
+  exit 1
+fi
 
 # --- Network resiliency for package installation ---
 echo "⚙️  Configuring robust network timeouts for package resolution..."
@@ -3055,7 +3788,7 @@ ${ enableManagedAgent ? `
     echo ""
     echo "🔥 Deleting Firestore Collection: ${fsCollection}..."
     if command -v uv >/dev/null 2>&1; then
-      GOOGLE_API_USE_CLIENT_CERTIFICATE=false uv run --with google-cloud-firestore python3 -c "from google.cloud import firestore; db=firestore.Client(); [d.reference.delete() for d in db.collection('${fsCollection}').stream()]" 2>/dev/null && echo "   ✅ Firestore documents in collection deleted." || echo "   ⚠️  Could not clear Firestore collection automatically."
+      GOOGLE_API_USE_CLIENT_CERTIFICATE=false uv run --no-project --with "${PINNED_DEPS.firestore}" python3 -c "from google.cloud import firestore; db=firestore.Client(); [d.reference.delete() for d in db.collection('${fsCollection}').stream()]" 2>/dev/null && echo "   ✅ Firestore documents in collection deleted." || echo "   ⚠️  Could not clear Firestore collection automatically."
     fi
 
     echo ""
@@ -3195,6 +3928,18 @@ ${ enableManagedAgent ? `
     done
 
     echo ""
+    echo "📥 Purging Cloud Tasks queue..."
+    # PURGED, not deleted, on purpose: Cloud Tasks tombstones a deleted queue
+    # name for 7 days and refuses to recreate it. Re-running setup inside that
+    # window would silently drop the demo back to the in-container dispatch,
+    # which cannot survive a scale-to-zero. An empty queue costs nothing and is
+    # reused as-is by the next setup run.
+    gcloud tasks queues purge "${dirName}-worker" --location=us-central1 \\
+      --project="$PROJECT_ID" --quiet 2>/dev/null \\
+      && echo "   ✅ Queue purged: ${dirName}-worker (kept: the name is reserved for 7 days after a delete)" \\
+      || echo "   ⚠️  Queue not found: ${dirName}-worker"
+
+    echo ""
     echo "⏰ Deleting Cloud Scheduler jobs..."
     SCHED_JOBS=$(gcloud scheduler jobs list --location=us-central1 --project="$PROJECT_ID" \\
       --format="value(name)" 2>/dev/null | grep "${dirName}-sched-" || true)
@@ -3211,10 +3956,10 @@ ${ enableManagedAgent ? `
 
     echo ""
     echo "📁 Deleting Firestore task collections..."
-    GOOGLE_API_USE_CLIENT_CERTIFICATE=false uv run --no-project --with google-cloud-firestore python3 -c "
+    GOOGLE_API_USE_CLIENT_CERTIFICATE=false uv run --no-project --with "${PINNED_DEPS.firestore}" python3 -c "
 from google.cloud import firestore
 db = firestore.Client()
-for coll_name in ['${dirName}_task_definitions', '${dirName}_task_executions', '${dirName}_task_push_configs']:
+for coll_name in ['${dirName}_task_definitions', '${dirName}_task_executions', '${dirName}_task_push_configs', '${dirName}_adk_sessions']:
     docs = list(db.collection(coll_name).stream())
     for doc in docs:
         doc.reference.delete()
@@ -3237,6 +3982,14 @@ for coll_name in ['${dirName}_task_definitions', '${dirName}_task_executions', '
       echo "   ⚠️  Please delete the Slack App manually at: https://api.slack.com/apps"
       echo "   Look for an app named 'GE-${dirName}' and delete it."
     fi
+${ (params.importedMcpList || []).some(m => m.type === 'remote' && m.auth_type === 'oauth2_dcr') ? `
+    echo ""
+    echo "🔗 Managed remote MCP authorizations (manual cleanup):"
+    echo "   Setup registered an OAuth client named 'GE Demo (${dirName})' with:"
+${params.importedMcpList.filter(m => m.type === 'remote' && m.auth_type === 'oauth2_dcr').map(m => `    echo "     • ${m.name || m.endpoint_url}"`).join('\n')}
+    echo "   Dynamically registered clients usually cannot be deleted via API."
+    echo "   Revoke the demo's access in each provider's connected-apps settings."
+` : '' }
 
     echo ""
     echo "========================================================="
@@ -3270,7 +4023,7 @@ while true; do
   echo "Choose an option:"
   echo "  [Y] Yes, proceed with this project (Default)"
   echo "  [N] No, cancel deployment"
-  echo "  [M] Modify the root agent model (Change to gemini-3.1-flash-lite)"
+  echo "  [M] Modify the root agent model (Change to gemini-3.5-flash-lite)"
   echo ""
   read -p "▶ Enter choice [Y/n/m]: " REPLY
   echo
@@ -3292,16 +4045,16 @@ while true; do
     # --- Model Selection Flow ---
     echo ""
     echo "🧠 Configure Chat & Orchestration Model (root_agent):"
-    echo "   - root_agent (Chat/UI): Uses 'gemini-3.5-flash' by default."
-    echo "   - deep_analysis_agent (Reasoning): Uses 'gemini-3.5-flash'."
+    echo "   - root_agent (Chat/UI): Uses 'gemini-3.6-flash' by default."
+    echo "   - deep_analysis_agent (Reasoning): Uses 'gemini-3.6-flash'."
     echo ""
-    echo "   You can choose 'gemini-3.1-flash-lite' for the root_agent."
+    echo "   You can choose 'gemini-3.5-flash-lite' for the root_agent."
     echo "   While it yields simpler and more concise responses, it provides"
     echo "   much faster and snappier interactions for routine chat."
     echo "   For complex tasks requiring deep analysis, the root_agent can"
-    echo "   still delegate the work to the deep_analysis_agent (3.5-flash)."
+    echo "   still delegate the work to the deep_analysis_agent (3.6-flash)."
     echo ""
-    read -p "▶ Use lightweight gemini-3.1-flash-lite for root_agent? (Y/n): " CHOOSE_LITE
+    read -p "▶ Use lightweight gemini-3.5-flash-lite for root_agent? (Y/n): " CHOOSE_LITE
     CHOOSE_LITE=\$(echo "\$CHOOSE_LITE" | tr -d '\\r\\n\\t ')
     
     # Default to 'y' since they specifically selected 'M' to configure
@@ -3310,11 +4063,11 @@ while true; do
     fi
     
     if [[ "\$CHOOSE_LITE" =~ ^[Yy]$ ]]; then
-      AGENT_MODEL_LITE="gemini-3.1-flash-lite"
-      echo "   ✅ Configured root_agent to use: gemini-3.1-flash-lite"
+      AGENT_MODEL_LITE="gemini-3.5-flash-lite"
+      echo "   ✅ Configured root_agent to use: gemini-3.5-flash-lite"
     else
-      AGENT_MODEL_LITE="gemini-3.5-flash"
-      echo "   ℹ️  Keeping default root_agent: gemini-3.5-flash"
+      AGENT_MODEL_LITE="gemini-3.6-flash"
+      echo "   ℹ️  Keeping default root_agent: gemini-3.6-flash"
     fi
     echo ""
     # Directly proceed to deployment steps after configuration is complete
@@ -3389,15 +4142,219 @@ else
   echo "    your account lacks permission to list apps — in which case detection may be"
   echo "    a false negative.)"
   echo ""
-  echo "   You MUST have a Gemini Enterprise instance already created in this project."
-  echo "   If you haven't, please create one here first:"
-  echo "   https://console.cloud.google.com/gemini-enterprise/products?project=$PROJECT_ID"
-  echo ""
-  read -p "Have you confirmed the instance exists? (y/n) " -n 1 -r
-  echo
-  if [[ ! \$REPLY =~ ^[Yy]$ ]]; then
-      echo "Exiting. Please create the instance and run the script again."
-      exit 1
+
+  GE_APP_CREATED=""
+  if [ ! -z "\$GE_TOKEN" ]; then
+    # The bulk API-enable step runs later in this script, so make sure the
+    # Discovery Engine API is on before probing subscriptions (fresh projects).
+    gcloud services enable discoveryengine.googleapis.com --project "\$PROJECT_ID" >/dev/null 2>&1 || true
+    # Check for an active Gemini Enterprise subscription (license config).
+    GE_LICENSE_STATE=$(curl -s -H "Authorization: Bearer \$GE_TOKEN" -H "X-Goog-User-Project: \$PROJECT_ID" \
+      "https://discoveryengine.googleapis.com/v1alpha/projects/\$PROJECT_ID/locations/global/licenseConfigs" \
+      | python3 -c '
+import sys, json
+try:
+    configs = json.load(sys.stdin).get("licenseConfigs", [])
+    active = any(c.get("state") == "ACTIVE" and c.get("subscriptionTier") == "SUBSCRIPTION_TIER_SEARCH_AND_ASSISTANT" for c in configs)
+    print("ACTIVE" if active else "INACTIVE")
+except Exception:
+    print("UNKNOWN")
+' 2>/dev/null)
+
+    # No active subscription: offer to start a free trial automatically.
+    # Safety: the request always pins freeTrial=true and the result is only
+    # accepted if the server confirms an ACTIVE free trial. A paid
+    # subscription is NEVER purchased automatically.
+    if [ "\$GE_LICENSE_STATE" != "ACTIVE" ]; then
+      echo "ℹ️  No active Gemini Enterprise subscription was found in this project."
+      echo "   The script can provision this project for Gemini Enterprise and start a"
+      echo "   free trial subscription. Proceeding means you accept:"
+      echo "   - the Terms for data use (https://cloud.google.com/retail/data-use-terms)"
+      echo "   - the Gemini Enterprise (Agentspace) quality-of-service terms"
+      read -p "   Start a free trial subscription automatically? (y/n) " -n 1 -r
+      echo
+      if [[ \$REPLY =~ ^[Yy]$ ]]; then
+        TRIAL_OUT=$(python3 - "\$PROJECT_ID" "\$GE_TOKEN" << 'PYEOF'
+import sys, json, time, datetime, urllib.request, urllib.error
+project_id, token = sys.argv[1], sys.argv[2]
+headers = {
+    "Authorization": "Bearer " + token,
+    "Content-Type": "application/json",
+    "X-Goog-User-Project": project_id,
+}
+api = "https://discoveryengine.googleapis.com/v1alpha/"
+
+# Step 1: provision the project for Discovery Engine / Gemini Enterprise.
+# This creates the default user store required by license configs. Idempotent
+# on already-provisioned projects. The user consented to the terms above.
+prov_body = {
+    "acceptDataUseTerms": True,
+    "dataUseTermsVersion": "2022-11-23",
+    "saasParams": {"acceptBizQos": True},
+}
+req = urllib.request.Request(api + "projects/" + project_id + ":provision",
+                             data=json.dumps(prov_body).encode("utf-8"), headers=headers)
+try:
+    with urllib.request.urlopen(req) as resp:
+        op = json.loads(resp.read().decode("utf-8"))
+except urllib.error.HTTPError as e:
+    print("TRIAL_FAIL: provisioning failed: HTTP " + str(e.code) + " " + e.read().decode("utf-8")[:300])
+    sys.exit(1)
+except Exception as e:
+    print("TRIAL_FAIL: provisioning failed: " + str(e))
+    sys.exit(1)
+deadline = time.time() + 120
+while not op.get("done") and op.get("name") and time.time() < deadline:
+    time.sleep(5)
+    try:
+        with urllib.request.urlopen(urllib.request.Request(api + op["name"], headers=headers)) as resp:
+            op = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        pass
+if not op.get("done") or op.get("error"):
+    print("TRIAL_FAIL: provisioning did not complete: " + json.dumps(op.get("error") or {})[:300])
+    sys.exit(1)
+
+# Step 2: create the free trial license config. freeTrial is pinned to True
+# and the result is only accepted if the server confirms an ACTIVE free
+# trial - a paid subscription is NEVER purchased automatically.
+# The server validates startDate as "future" against Pacific time, so
+# passing today's local date fails with 400 whenever local date == PT date.
+# Always send tomorrow: the server still activates the trial immediately
+# (state=ACTIVE) and normalizes the term to one month.
+start = datetime.date.today() + datetime.timedelta(days=1)
+end = start + datetime.timedelta(days=30)
+body = {
+    "subscriptionTier": "SUBSCRIPTION_TIER_SEARCH_AND_ASSISTANT",
+    "licenseCount": "50",
+    "subscriptionTerm": "SUBSCRIPTION_TERM_CUSTOM",
+    "startDate": {"year": start.year, "month": start.month, "day": start.day},
+    "endDate": {"year": end.year, "month": end.month, "day": end.day},
+    "freeTrial": True,
+}
+url = (api + "projects/" + project_id
+       + "/locations/global/licenseConfigs?licenseConfigId=free_trial_agent_space")
+req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers)
+try:
+    with urllib.request.urlopen(req) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+except urllib.error.HTTPError as e:
+    print("TRIAL_FAIL: HTTP " + str(e.code) + " " + e.read().decode("utf-8")[:300])
+    sys.exit(1)
+except Exception as e:
+    print("TRIAL_FAIL: " + str(e))
+    sys.exit(1)
+if data.get("freeTrial") is True and data.get("state") == "ACTIVE":
+    print("TRIAL_OK")
+else:
+    print("TRIAL_FAIL: the created config is not a confirmed active free trial"
+          + " (state=" + str(data.get("state")) + ", freeTrial=" + str(data.get("freeTrial"))
+          + "). Please check the Gemini Enterprise console.")
+    sys.exit(1)
+PYEOF
+) || true
+        if echo "\$TRIAL_OUT" | grep -q "^TRIAL_OK"; then
+          echo "   ✅ Free trial subscription activated."
+          GE_LICENSE_STATE="ACTIVE"
+        else
+          echo "   ⚠️  Could not start a free trial automatically:"
+          echo "\$TRIAL_OUT" | sed 's/^/      /'
+        fi
+      fi
+    fi
+
+    # Active subscription: offer to create the Gemini Enterprise app automatically.
+    if [ "\$GE_LICENSE_STATE" = "ACTIVE" ]; then
+      read -p "   Create a Gemini Enterprise app in this project automatically now? (y/n) " -n 1 -r
+      echo
+      if [[ \$REPLY =~ ^[Yy]$ ]]; then
+        echo "   ⏳ Creating Gemini Enterprise app (this can take a minute or two)..."
+        CREATE_OUT=$(python3 - "\$PROJECT_ID" "\$GE_TOKEN" << 'PYEOF'
+import sys, json, time, urllib.request, urllib.error
+project_id, token = sys.argv[1], sys.argv[2]
+headers = {
+    "Authorization": "Bearer " + token,
+    "Content-Type": "application/json",
+    "X-Goog-User-Project": project_id,
+}
+engine_id = "gemini-enterprise-" + str(int(time.time()))
+base = ("https://discoveryengine.googleapis.com/v1alpha/projects/" + project_id
+        + "/locations/global/collections/default_collection/engines")
+body = {
+    "displayName": "Gemini Enterprise",
+    "solutionType": "SOLUTION_TYPE_SEARCH",
+    "appType": "APP_TYPE_INTRANET",
+    "industryVertical": "GENERIC",
+    "searchEngineConfig": {
+        "searchTier": "SEARCH_TIER_ENTERPRISE",
+        "searchAddOns": ["SEARCH_ADD_ON_LLM"],
+        "requiredSubscriptionTier": "SUBSCRIPTION_TIER_SEARCH_AND_ASSISTANT",
+    },
+}
+req = urllib.request.Request(base + "?engineId=" + engine_id,
+                             data=json.dumps(body).encode("utf-8"), headers=headers)
+try:
+    with urllib.request.urlopen(req) as resp:
+        op = json.loads(resp.read().decode("utf-8"))
+except urllib.error.HTTPError as e:
+    print("CREATE_FAIL: HTTP " + str(e.code) + " " + e.read().decode("utf-8")[:300])
+    sys.exit(1)
+except Exception as e:
+    print("CREATE_FAIL: " + str(e))
+    sys.exit(1)
+op_name = op.get("name", "")
+deadline = time.time() + 180
+while op_name and not op.get("done") and time.time() < deadline:
+    time.sleep(5)
+    try:
+        poll = urllib.request.Request("https://discoveryengine.googleapis.com/v1alpha/" + op_name, headers=headers)
+        with urllib.request.urlopen(poll) as resp:
+            op = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        pass
+if op.get("error"):
+    print("CREATE_FAIL: " + json.dumps(op["error"])[:300])
+    sys.exit(1)
+# Wait until the new app is visible in the engines list (later steps re-list it).
+while time.time() < deadline:
+    try:
+        lst = urllib.request.Request(base, headers=headers)
+        with urllib.request.urlopen(lst) as resp:
+            engines = json.loads(resp.read().decode("utf-8")).get("engines", [])
+        if any(e.get("name", "").endswith("/" + engine_id) for e in engines):
+            print("GE_APP_CREATED:" + engine_id)
+            sys.exit(0)
+    except Exception:
+        pass
+    time.sleep(5)
+print("CREATE_FAIL: the app did not appear in the engines list within the timeout")
+sys.exit(1)
+PYEOF
+) || true
+        GE_APP_CREATED=$(echo "\$CREATE_OUT" | grep "^GE_APP_CREATED:" | cut -d':' -f2)
+        if [ ! -z "\$GE_APP_CREATED" ]; then
+          echo "   ✅ Created Gemini Enterprise app: \$GE_APP_CREATED (location: global)"
+          echo "Proceeding automatically."
+        else
+          echo "   ⚠️  Automatic app creation failed:"
+          echo "\$CREATE_OUT" | sed 's/^/      /'
+        fi
+      fi
+    fi
+  fi
+
+  if [ -z "\$GE_APP_CREATED" ]; then
+    echo ""
+    echo "   You MUST have a Gemini Enterprise instance already created in this project."
+    echo "   If you haven't, please create one here first:"
+    echo "   https://console.cloud.google.com/gemini-enterprise/products?project=$PROJECT_ID"
+    echo ""
+    read -p "Have you confirmed the instance exists? (y/n) " -n 1 -r
+    echo
+    if [[ ! \$REPLY =~ ^[Yy]$ ]]; then
+        echo "Exiting. Please create the instance and run the script again."
+        exit 1
+    fi
   fi
 fi
 
@@ -3474,7 +4431,7 @@ grant_roles_fast "$PROJECT_ID" "serviceAccount" "\$COMPUTE_SA" \
   "roles/mcp.toolUser" "roles/bigquery.jobUser" "roles/bigquery.dataEditor" \
   "roles/serviceusage.serviceUsageConsumer" "roles/aiplatform.user" "roles/logging.logWriter" \
   "roles/datastore.user" "roles/storage.objectViewer" "roles/storage.objectAdmin" "roles/artifactregistry.admin" "roles/run.invoker" \
-  "roles/pubsub.publisher" "roles/cloudscheduler.admin" "roles/dataplex.catalogViewer"
+  "roles/pubsub.publisher" "roles/cloudscheduler.admin" "roles/cloudtasks.enqueuer" "roles/dataplex.catalogViewer"
 
 # Background task infra: Cloud Scheduler SA needs pubsub.publisher
 echo "🔐 Configuring IAM for Cloud Scheduler Service Agent..."
@@ -3497,6 +4454,22 @@ if gcloud iam service-accounts add-iam-policy-binding "\$COMPUTE_SA" \
   echo "  ✅ signBlob self-binding granted."
 else
   echo "  ⚠️  Failed to grant signBlob self-binding (V4 signed URLs may fail)."
+fi
+
+# --- Cloud Tasks: actAs self-binding ---
+# Enqueueing a task whose http_request carries an oidc_token requires
+# iam.serviceAccounts.actAs on the impersonated SA. The runtime names ITSELF in
+# the token, so the binding is again resource-level on the SA and cannot go
+# through grant_roles_fast. Without it every enqueue fails and the worker
+# silently falls back to the localhost self-call.
+echo "🔐 Granting actAs (serviceAccountUser) on the runtime SA to itself..."
+if gcloud iam service-accounts add-iam-policy-binding "\$COMPUTE_SA" \
+    --member="serviceAccount:\$COMPUTE_SA" \
+    --role="roles/iam.serviceAccountUser" \
+    --project="$PROJECT_ID" --quiet >/dev/null 2>&1; then
+  echo "  ✅ actAs self-binding granted."
+else
+  echo "  ⚠️  Failed to grant actAs self-binding (background tasks fall back to the in-container dispatch)."
 fi
 
 echo "🪣 Creating non-public dashboards bucket: \$DASH_BUCKET ..."
@@ -3524,18 +4497,52 @@ fi
 # --- Agent Template Fetch (pinned) ---
 # Static Python/JSON files (ADK agent runtime, A2UI examples, data viewer) are
 # fetched from the repo at a pinned ref instead of being embedded here.
-echo "📥 Fetching agent template (ref ${CONFIG.TEMPLATE_REF})..."
+echo "📥 Fetching agent template (ref ${templateRef})..."
 GE_TPL_ROOT="$(pwd)/_ge_template"
 rm -rf "$GE_TPL_ROOT"
 git init -q "$GE_TPL_ROOT"
 git -C "$GE_TPL_ROOT" remote add origin "${CONFIG.TEMPLATE_REPO}"
-git -C "$GE_TPL_ROOT" sparse-checkout set --cone "${CONFIG.TEMPLATE_SUBDIR}" 2>/dev/null || true
-if ! git -C "$GE_TPL_ROOT" fetch -q --depth 1 --filter=blob:none origin "${CONFIG.TEMPLATE_REF}"; then
-  echo "❌ Could not fetch agent template ref '${CONFIG.TEMPLATE_REF}'"
-  echo "   from ${CONFIG.TEMPLATE_REPO}."
-  echo "   The pinned template version is unreachable. Ask the demo creator to"
-  echo "   regenerate this script (the app's TEMPLATE_REF may need updating)."
-  exit 1
+git -C "$GE_TPL_ROOT" sparse-checkout set --cone "${CONFIG.TEMPLATE_SUBDIR}"
+# The fetch runs in two tiers and keeps git's own message. A blob:none partial
+# clone is only an optimization, so a client or proxy that cannot do one falls
+# back to a plain shallow fetch instead of failing the whole setup. Keeping the
+# error output lets a real failure report what actually went wrong: every
+# non-zero exit here used to be reported as an unreachable pinned ref, which
+# sent users off to regenerate a script whose pin was perfectly fine.
+if ! GE_TPL_ERR=$(git -C "$GE_TPL_ROOT" fetch --depth 1 --filter=blob:none origin "${templateRef}" 2>&1); then
+  if ! GE_TPL_ERR=$(git -C "$GE_TPL_ROOT" fetch --depth 1 origin "${templateRef}" 2>&1); then
+    echo "❌ Could not fetch the agent template from ${CONFIG.TEMPLATE_REPO}"
+    echo "   at ref '${templateRef}'. git reported:"
+    echo "$GE_TPL_ERR" | sed 's/^/     /'
+    case "$GE_TPL_ERR" in
+      *"not our ref"*|*"couldn't find remote ref"*|*"unadvertised"*)
+        echo "   → That template version no longer exists in the repository."
+        echo "     Ask the demo creator to regenerate this script."
+        ;;
+      *"not found"*|*"Authentication failed"*|*"could not read Username"*)
+        echo "   → That URL is not a git remote this machine can clone."
+        echo "     A GitHub browse URL (one containing /tree/ or /blob/) is a web"
+        echo "     page, not a repository; the clone URL ends in .git. Ask the demo"
+        echo "     creator to check the TEMPLATE_REPO Script Property of the app"
+        echo "     and regenerate this script."
+        ;;
+      *"Could not resolve host"*|*"Failed to connect"*|*"Connection timed out"*|*"SSL"*|*"certificate"*|*"proxy"*)
+        echo "   → github.com is not reachable from this machine (network policy,"
+        echo "     proxy, or TLS interception). Run this script in Cloud Shell,"
+        echo "     which is the supported environment."
+        ;;
+      *"No space left"*)
+        echo "   → The disk is full. Free up space in $HOME and re-run."
+        ;;
+      *)
+        echo "   → Re-run this script in Cloud Shell, which is the supported"
+        echo "     environment. If it fails there too, please report the git"
+        echo "     output above."
+        ;;
+    esac
+    exit 1
+  fi
+  echo "    ⚠️  Partial clone is unsupported here; used a plain shallow fetch."
 fi
 git -C "$GE_TPL_ROOT" -c advice.detachedHead=false checkout -q FETCH_HEAD
 GE_TPL="$GE_TPL_ROOT/${CONFIG.TEMPLATE_SUBDIR}"
@@ -3666,6 +4673,7 @@ gcloud beta services mcp enable firestore.googleapis.com --project="$PROJECT_ID"
 gcloud beta services mcp enable dataplex.googleapis.com --project="$PROJECT_ID" 2>/dev/null &
 gcloud services enable aiplatform.googleapis.com --project="$PROJECT_ID" 2>/dev/null &
 gcloud services enable cloudscheduler.googleapis.com --project="$PROJECT_ID" 2>/dev/null &
+gcloud services enable cloudtasks.googleapis.com --project="$PROJECT_ID" 2>/dev/null &
 gcloud services enable pubsub.googleapis.com --project="$PROJECT_ID" 2>/dev/null &
 wait
 echo "  ✅ MCP services enabled"
@@ -3713,12 +4721,19 @@ ${PINNED_DEPS.storage}
 ${PINNED_DEPS.a2ui}
 ${PINNED_DEPS.a2a}
 ${PINNED_DEPS.scheduler}
+${PINNED_DEPS.tasks}
 ${PINNED_DEPS.pubsub}
 ${PINNED_DEPS.firestore}
 ${PINNED_DEPS.logging}
 ${PINNED_DEPS.otel}
-${ enableComputerUse ? `${PINNED_DEPS.playwright}\n${PINNED_DEPS.genaiComputerUse}` : '' }
+${ enableComputerUse ? `${PINNED_DEPS.playwright}\n${PINNED_DEPS.genaiComputerUse}\n${PINNED_DEPS.cuOtelGcpLogging}\n${PINNED_DEPS.cuOtelGcpResourceDetector}` : '' }
 __REQ_EOF__
+
+# Generate constraints.txt -- applied to third-party installs inside the image
+# (cloned MCP server repos) so their own requirements cannot break our caps.
+cat <<'__CONSTRAINTS_EOF__' > constraints.txt
+${constraintsTxt}
+__CONSTRAINTS_EOF__
 
 # Generate pyproject.toml required for adk project type
 cp "$GE_TPL/pyproject.toml" pyproject.toml
@@ -3735,9 +4750,116 @@ FROM ${PINNED_DEPS.pythonImage}
 COPY --from=${PINNED_DEPS.uvImage} /uv /uvx /bin/
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY requirements.txt pyproject.toml ./
+COPY requirements.txt constraints.txt pyproject.toml ./
 RUN uv pip install --system -r requirements.txt
 __DOCKER_EOF__
+
+# Generate the build-time dependency import smoke test (v11.39).
+# Self-maintaining: it derives what to check from the generated sources, so it
+# stays correct for every feature-flag combination without being updated.
+cat <<'__DEP_SMOKE_EOF__' > dep_smoke_test.py
+"""Dependency import smoke test, executed during the Docker build.
+
+Walks the generated agent package, collects every third-party module and
+symbol the code imports, and resolves each one. When a dependency changes its
+module layout under us -- e.g. mcp 2.0.0 removing mcp.shared.session, which
+google-adk imports -- the BUILD fails here naming the offending module,
+instead of the container dying on import and surfacing only as a Cloud Run
+startup probe that retries forever. See AGENTS.md section 8.
+
+Imports inside a try/except are treated as optional and skipped, so genuinely
+optional integrations do not break the build.
+"""
+import ast
+import importlib
+import os
+import sys
+
+PKG_ROOT = 'adk_agent'
+LOCAL_ROOTS = ('adk_agent', 'app')
+
+
+def collect(path):
+    """Return (module, symbol_or_None) pairs for non-optional third-party imports."""
+    with open(path, 'r', encoding='utf-8') as handle:
+        source = handle.read()
+    try:
+        tree = ast.parse(source, filename=path)
+    except SyntaxError as exc:
+        # A file we cannot parse is not a dependency problem. Warn and move on:
+        # this test must never be the reason a build fails.
+        print('  ! skipped ' + path + ' (unparseable: ' + str(exc) + ')')
+        return set()
+
+    optional = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try):
+            for inner in ast.walk(node):
+                if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                    optional.add(id(inner))
+
+    found = set()
+    for node in ast.walk(tree):
+        if id(node) in optional:
+            continue
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                found.add((alias.name, None))
+        elif isinstance(node, ast.ImportFrom):
+            # level > 0 is a relative import of our own package
+            if node.level or not node.module:
+                continue
+            for alias in node.names:
+                symbol = None if alias.name == '*' else alias.name
+                found.add((node.module, symbol))
+    return set(p for p in found if p[0].split('.')[0] not in LOCAL_ROOTS)
+
+
+def resolve(module, symbol):
+    obj = importlib.import_module(module)
+    if symbol is None or hasattr(obj, symbol):
+        return
+    # Submodule that has not been imported yet is not an attribute yet.
+    importlib.import_module(module + '.' + symbol)
+
+
+def main():
+    if not os.path.isdir(PKG_ROOT):
+        print('Dep smoke test SKIPPED: no ' + PKG_ROOT + ' directory')
+        return 0
+
+    pairs = set()
+    for root, _dirs, files in os.walk(PKG_ROOT):
+        for name in files:
+            if name.endswith('.py'):
+                pairs |= collect(os.path.join(root, name))
+
+    failures = []
+    # Sort on (module, symbol or '') -- a plain import yields symbol None and a
+    # from-import yields a str, and the default tuple ordering compares the two
+    # against each other the moment both forms exist for one module.
+    for module, symbol in sorted(pairs, key=lambda pair: (pair[0], pair[1] or '')):
+        try:
+            resolve(module, symbol)
+        except Exception as exc:
+            target = module if symbol is None else module + '.' + symbol
+            failures.append(target + ' -> ' + type(exc).__name__ + ': ' + str(exc))
+
+    if failures:
+        print('FAIL: dependency import smoke test (' + str(len(failures)) + ' broken)')
+        for line in failures:
+            print('  ' + line)
+        print('A dependency changed its module layout. Check PINNED_DEPS caps')
+        print('in Code.gs against the installed versions in /app/.dep-versions.')
+        return 1
+
+    print('Dep smoke test OK (' + str(len(pairs)) + ' imports resolved)')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+__DEP_SMOKE_EOF__
 
 ${ enableComputerUse ? `
 # -- Computer Use: install Chromium + OS libs for headless Playwright browsing --
@@ -3772,15 +4894,40 @@ RUN git clone ${mcp.github_url} ${mcpDir}
 __DOCKER_MCP_CLONE_${idx}_EOF__
 `;
     let installStep;
-    const pipCmd = `(if [ -f pyproject.toml ] || [ -f setup.py ]; then uv pip install --system . 2>/dev/null || true; elif [ -f requirements.txt ]; then uv pip install --system -r requirements.txt; fi)`;
-    const npmCmd = `(npm install && npm run build 2>/dev/null || true)`;
+    // -c /app/constraints.txt (v11.40): this installs a repo we did not write,
+    // with dependency bounds we did not choose, into the same site-packages the
+    // agent imports from. Without the constraints file an `mcp>=2` pinned in
+    // that repo upgrades past our cap and the container dies at import.
+    //
+    // v11.43: every branch below used to end in `2>/dev/null || true`. Three
+    // consequences, all of which shipped: a failed install produced a green
+    // image whose sidecar then died at runtime with its dependencies missing;
+    // the stderr naming the cause was discarded; and because `( ... || true )`
+    // always exits 0, the `|| npm` fallback in the Python path was unreachable
+    // code. Adding the constraints file made the first one likelier, not less
+    // -- a cloned server that demands mcp>=2 now fails resolution, which is
+    // precisely the failure that was being swallowed. Each position below
+    // either fails the build or prints a warning; nothing is silent.
+    const pipInstall = `uv pip install --system -c /app/constraints.txt`;
+    // Primary position. No Python manifest at all is a failure here too, so
+    // that the Node fallback actually gets its turn.
+    const pipStrict = `(if [ -f pyproject.toml ] || [ -f setup.py ]; then ${pipInstall} .; elif [ -f requirements.txt ]; then ${pipInstall} -r requirements.txt; else echo "MCP install: no pyproject.toml, setup.py or requirements.txt" >&2; false; fi)`;
+    // Trailing position on a Node repo: a bonus attempt for hybrid servers, so
+    // a failure stays non-fatal -- but it is announced rather than hidden.
+    const pipBonus = `(if [ -f pyproject.toml ] || [ -f setup.py ]; then ${pipInstall} . || echo "WARNING: optional Python install failed, see above" >&2; elif [ -f requirements.txt ]; then ${pipInstall} -r requirements.txt || echo "WARNING: optional Python install failed, see above" >&2; fi)`;
+    // A declared build script that fails is fatal: a half-built TypeScript
+    // server is exactly the image that starts and then cannot serve a tool
+    // call. A repo that declares no build script is skipped, not failed.
+    const npmCmd = `(npm install && { if [ "$(npm pkg get scripts.build)" = "{}" ]; then echo "MCP install: no build script declared, skipping" >&2; else npm run build; fi; })`;
     const ign = mcp.npm_ignore_scripts ? 'ENV NPM_CONFIG_IGNORE_SCRIPTS=true\n' : '';
     if (isNodejs) {
-      // Primary: Node.js install. Fallback: Python install if npm fails.
-      installStep = `${ign}RUN cd ${mcpDir} && ${npmCmd} && ${pipCmd}`;
+      // Primary: Node.js install, fatal on failure. Then a best-effort Python
+      // install for servers that ship both.
+      installStep = `${ign}RUN cd ${mcpDir} && ${npmCmd} && ${pipBonus}`;
     } else {
-      // Primary: Python install. Fallback: Node.js install if pip fails.
-      installStep = `RUN cd ${mcpDir} && ${pipCmd} || ${npmCmd}`;
+      // Primary: Python install. Fallback: Node.js install if pip fails. If
+      // both fail the build stops here rather than at the customer's demo.
+      installStep = `RUN cd ${mcpDir} && ( ${pipStrict} || ${npmCmd} )`;
     }
     dockerSteps += `
 cat <<'__DOCKER_MCP_INSTALL_${idx}_EOF__' >> Dockerfile
@@ -3880,10 +5027,15 @@ __DOCKER_START_EOF__`;
 
 cat <<'__DOCKER_TAIL_EOF__' >> Dockerfile
 COPY . .
-# Dependency smoke test: fail build if critical interface missing
-RUN python -c "from a2ui.a2a.parts import create_a2ui_part; import inspect; assert 'version' in inspect.signature(create_a2ui_part).parameters, 'FAIL: a2ui version param missing'; print('Dep smoke test OK')"
-# Record installed versions for debugging
+# Record installed versions FIRST so they are in the build log even when the
+# smoke test below fails -- that pairing is what makes a break easy to trace.
 RUN uv pip freeze | grep -iE "^(google-adk|a2ui|mcp|google-genai|a2a-sdk)" | tee /app/.dep-versions
+# Dependency import smoke test (v11.39): resolves every third-party module and
+# symbol the generated code imports. Catches an upstream module-layout change
+# at BUILD time instead of as a stalled Cloud Run startup probe. AGENTS.md 8.
+RUN python dep_smoke_test.py
+# a2ui interface check: module import alone cannot see a dropped parameter.
+RUN python -c "from a2ui.a2a.parts import create_a2ui_part; import inspect; assert 'version' in inspect.signature(create_a2ui_part).parameters, 'FAIL: a2ui version param missing'; print('a2ui interface OK')"
 ENV PORT 8080
 ENV GOOGLE_GENAI_USE_VERTEXAI=1
 ENV PYTHONUNBUFFERED=1
@@ -3948,7 +5100,7 @@ export SANDBOX_OUT="/tmp/sandbox_result_$$.txt"
 # If Dockerfile/MCP files exist in CWD, the SDK tries to build them → hang.
 SANDBOX_TMPDIR=$(mktemp -d)
 pushd "$SANDBOX_TMPDIR" > /dev/null
-GOOGLE_API_USE_CLIENT_CERTIFICATE=false uv run --no-project --with "google-cloud-aiplatform[agent_engines]>=1.112.0" python3 << '__SANDBOX_PROVISION_EOF__'
+GOOGLE_API_USE_CLIENT_CERTIFICATE=false uv run --no-project --with "${PINNED_DEPS.aiplatform}" python3 << '__SANDBOX_PROVISION_EOF__'
 import sys, os, warnings, time, vertexai
 from vertexai import types
 
@@ -4143,9 +5295,13 @@ gcloud services enable secretmanager.googleapis.com
 `;
 
     params.importedMcpList.forEach((mcp, mcpIdx) => {
-      // -- Remote Managed MCP (Slack): token already in Secret Manager from provisioning --
-      if (mcp.type === 'remote' && mcp.auth_type === 'oauth2_slack') {
-        // Slack token stored in Secret Manager during provisioning step
+      // -- Remote Managed MCP: credentials already in Secret Manager --
+      // The interactive setup block above wrote the Slack user token / generic
+      // OAuth blob / static API token before we got here, so there is nothing
+      // to provision. Returning also keeps remote entries out of the sidecar
+      // path below, which would otherwise derive secret names from github_url
+      // (a docs link for remote servers).
+      if (mcp.type === 'remote') {
         return;
       }
       // ── Sidecar MCP ──
@@ -4201,7 +5357,17 @@ gcloud services enable secretmanager.googleapis.com
     --member="serviceAccount:$COMPUTE_SA" \\
     --role="roles/secretmanager.secretAccessor" \\
     --condition=None --quiet >/dev/null 2>&1 || true
-
+${ (params.importedMcpList || []).some(m => m.type === 'remote' && (m.auth_type === 'oauth2_dcr' || m.auth_type === 'oauth2_manual')) ? `
+  # A managed remote MCP server may rotate its refresh token when the agent
+  # refreshes. Let the runtime write the new one back so it survives a cold
+  # start; without this the demo still runs, it just falls back to re-running
+  # the setup script after a restart that follows a rotation.
+  echo "🔐 Granting Secret Version Adder role (remote MCP token rotation)..."
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \\
+    --member="serviceAccount:$COMPUTE_SA" \\
+    --role="roles/secretmanager.secretVersionAdder" \\
+    --condition=None --quiet >/dev/null 2>&1 || true
+` : '' }
   SERVICE_NAME="${dirName}"
 
   # --- Pre-create Pub/Sub topics in background (no dependency on SERVICE_URL) ---
@@ -4210,6 +5376,29 @@ gcloud services enable secretmanager.googleapis.com
   echo "📨 Pre-creating Pub/Sub topics (parallel with deploy)..."
   gcloud pubsub topics create "$SCHED_TOPIC" --project="$PROJECT_ID" 2>/dev/null &
   gcloud pubsub topics create "$RESULT_TOPIC" --project="$PROJECT_ID" 2>/dev/null &
+
+  # --- Cloud Tasks queue for background work ---
+  # The runtime enqueues here instead of calling itself over localhost, so a
+  # background run survives the turn that started it, retries when the instance
+  # is recycled, and can wake a service that has scaled to zero.
+  # max-concurrent-dispatches matches _WORKER_SEMAPHORE (2) so the queue, not
+  # the container, is the place work waits. max-attempts leaves room for a few
+  # genuine recoveries without re-running a task forever.
+  WORKER_QUEUE="${dirName}-worker"
+  WORKER_QUEUE_LOCATION="us-central1"
+  echo "📥 Creating Cloud Tasks queue $WORKER_QUEUE (parallel with deploy)..."
+  (
+    gcloud tasks queues create "$WORKER_QUEUE" \\
+      --location="$WORKER_QUEUE_LOCATION" \\
+      --max-attempts=5 \\
+      --max-concurrent-dispatches=2 \\
+      --max-dispatches-per-second=5 \\
+      --min-backoff=15s \\
+      --max-backoff=300s \\
+      --project="$PROJECT_ID" >/dev/null 2>&1 \\
+    || gcloud tasks queues resume "$WORKER_QUEUE" \\
+      --location="$WORKER_QUEUE_LOCATION" --project="$PROJECT_ID" >/dev/null 2>&1
+  ) &
 
   DEPLOY_LOG=$(mktemp /tmp/deploy-XXXXXX.log)
   trap "rm -f \$DEPLOY_LOG" EXIT
@@ -4232,7 +5421,11 @@ gcloud services enable secretmanager.googleapis.com
       `ENABLE_MANAGED_AGENT=${enableManagedAgent ? '1' : '0'}`,
       `ENABLE_WORKSPACE_AUTH=${enableWorkspaceAuth ? '1' : '0'}`,
       "DASHBOARDS_BUCKET=\$DASH_BUCKET",
-      "RUNTIME_SA_EMAIL=\$COMPUTE_SA"
+      "RUNTIME_SA_EMAIL=\$COMPUTE_SA",
+      // Background worker dispatch. Unset (or a queue that cannot be reached)
+      // makes the runtime fall back to the in-container localhost self-call.
+      "WORKER_QUEUE=\$WORKER_QUEUE",
+      "WORKER_QUEUE_LOCATION=\$WORKER_QUEUE_LOCATION"
     ];
     let secrets = [];
     let optionalSecrets = [];
@@ -4248,10 +5441,21 @@ gcloud services enable secretmanager.googleapis.com
     
     if (params.importedMcpList && params.importedMcpList.length > 0) {
       params.importedMcpList.forEach((mcp, mcpIdx) => {
-        // ── Remote Managed MCP (Slack) ──
-        if (mcp.type === 'remote' && mcp.auth_type === 'oauth2_slack') {
-          // Slack MCP: static token from Secret Manager
-          secrets.push(`SLACK_ACCESS_TOKEN=${dirName}-slack-token:latest`);
+        // ── Remote Managed MCP ──
+        if (mcp.type === 'remote') {
+          if (mcp.auth_type === 'oauth2_slack') {
+            // Slack MCP: static token from Secret Manager
+            secrets.push(`SLACK_ACCESS_TOKEN=${dirName}-slack-token:latest`);
+          } else if (remoteMcpUsesAuthBlob_(mcp)) {
+            // Generic managed remote MCP: one JSON credential blob per server.
+            // Bound optionally so a demo still deploys when the operator
+            // skipped or failed the authorization step during setup.
+            optionalSecrets.push({
+              key: remoteMcpEnvKey_(mcp, mcpIdx),
+              secretName: remoteMcpSecretName_(dirName, mcp, mcpIdx)
+            });
+          }
+          // auth_type 'none' needs no credentials at all.
           return;
         }
         // ── Sidecar MCP ──
@@ -4291,6 +5495,27 @@ gcloud services enable secretmanager.googleapis.com
     
     let deployCmd = '';
 
+    // Scale-to-zero by default. An idle demo used to bill for a warm 8Gi/2vCPU
+    // instance around the clock; it now costs nothing between conversations.
+    // Three pieces of work made that safe (see the runtime comments):
+    //   - background runs go through Cloud Tasks, so they survive the turn that
+    //     started them and a cold service is woken to take them;
+    //   - ADK sessions are mirrored to Firestore and rehydrated on a cold start,
+    //     so an idle gap no longer wipes the conversation;
+    //   - a worker heartbeat plus an abandoned-run sweep finalize anything that
+    //     dies with a recycled instance.
+    // max-instances 1 makes the process-local state this design still relies on
+    // (per-session locks, the regenerate cache, the worker semaphore) actually
+    // true; one instance serves up to 80 concurrent requests, so it is not a
+    // throughput ceiling at demo scale.
+    // The cost is a cold start on the first message after an idle gap: measured
+    // live 2026-08-04 after a ~17 min idle, the container took ~20s to reach
+    // "Application startup complete" and the turn took 37s end to end against
+    // 9-13s warm, i.e. roughly +25s on that first message only. Export
+    // MIN_INSTANCES=1 before running the script to keep a warm instance for a
+    // live presentation.
+    deployCmd += `\n# Scale-to-zero unless the operator asked for a warm instance\nMIN_INSTANCES="\${MIN_INSTANCES:-0}"\n`;
+
     if (optionalSecrets.length > 0) {
       deployCmd += `\n# Discover provisioned optional secrets\nOPTIONAL_SECRETS=""\n`;
       optionalSecrets.forEach(os => {
@@ -4316,7 +5541,8 @@ gcloud services enable secretmanager.googleapis.com
     --cpu 2 \
     --no-cpu-throttling \
     --cpu-boost \
-    --min-instances 0 \
+    --min-instances "\$MIN_INSTANCES" \
+    --max-instances 1 \
     --timeout 1800 \
     --no-allow-unauthenticated \
     --ingress internal \
@@ -4326,13 +5552,14 @@ gcloud services enable secretmanager.googleapis.com
     --region us-central1 \
     --quiet > "\$DEPLOY_LOG" 2>&1 &`;
     } else {
-      deployCmd = `CR_ENV_VARS="${envVars.join(",")}"\nif [ "\$VIEWER_DEPLOYED" = "true" ]; then\n  CR_ENV_VARS="\$CR_ENV_VARS,DATA_VIEWER_URL=\$VIEWER_URL"\nfi\nCR_ENV_VARS="\$CR_ENV_VARS,SANDBOX_RESOURCE_NAME=\$SANDBOX_RESOURCE_NAME"\n${enableManagedAgent ? `CR_ENV_VARS="\$CR_ENV_VARS,MANAGED_AGENT_ID=\$MANAGED_AGENT_ID,MANAGED_AGENT_SKILLS_SOURCE=\$MA_SKILLS_SOURCE"\n` : ''}gcloud run deploy "\$SERVICE_NAME" \
+      deployCmd += `CR_ENV_VARS="${envVars.join(",")}"\nif [ "\$VIEWER_DEPLOYED" = "true" ]; then\n  CR_ENV_VARS="\$CR_ENV_VARS,DATA_VIEWER_URL=\$VIEWER_URL"\nfi\nCR_ENV_VARS="\$CR_ENV_VARS,SANDBOX_RESOURCE_NAME=\$SANDBOX_RESOURCE_NAME"\n${enableManagedAgent ? `CR_ENV_VARS="\$CR_ENV_VARS,MANAGED_AGENT_ID=\$MANAGED_AGENT_ID,MANAGED_AGENT_SKILLS_SOURCE=\$MA_SKILLS_SOURCE"\n` : ''}gcloud run deploy "\$SERVICE_NAME" \
     --source .. \
     --memory "8Gi" \
     --cpu 2 \
     --no-cpu-throttling \
     --cpu-boost \
-    --min-instances 0 \
+    --min-instances "\$MIN_INSTANCES" \
+    --max-instances 1 \
     --timeout 1800 \
     --no-allow-unauthenticated \
     --ingress internal \
@@ -4503,27 +5730,77 @@ if auth_id:
     if auth_id.startswith("projects/"):
         data["authorizationConfig"] = { "agentAuthorization": auth_id }
     else:
-        data["authorizationConfig"] = { "agentAuthorization": f"projects/{project_id}/locations/{location}/authorizations/{auth_id}" }
+        # Authorization resources are ALWAYS created in "global" (see the
+        # setup script), regardless of where the GE app itself lives. Binding
+        # to locations/{location} pointed a "us"/"eu" app at a resource that
+        # does not exist, which reproduces the endless "requires additional
+        # authorization" prompt. Always bind to global. (v11.38)
+        data["authorizationConfig"] = { "agentAuthorization": f"projects/{project_id}/locations/global/authorizations/{auth_id}" }
+auth_path = data.get("authorizationConfig", {}).get("agentAuthorization", "")
 
-req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers)
-try:
-    with urllib.request.urlopen(req) as response:
-        resp_data = json.loads(response.read().decode("utf-8"))
-        print("Successfully registered agent:")
-        print(json.dumps(resp_data, indent=2))
-        agent_name = resp_data.get("name", "")
-        agent_id = agent_name.split("/")[-1]
-        print(f"AGENT_ID:{agent_id}")
+def call(method, call_url, payload=None):
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(call_url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as response:
+            return response.getcode(), json.loads(response.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        return e.code, {"error": e.read().decode("utf-8", "replace")[:500]}
+    except Exception as e:
+        return 0, {"error": str(e)[:500]}
 
+# Idempotent overwrite (v11.34): re-running the setup script for the SAME
+# demo must UPDATE the existing registration (display name, description,
+# agent card, auth binding) instead of failing with FAILED_PRECONDITION
+# "authorization ... is used by another agent". Match by the agent card's
+# internal name (the unique demo dirName - same matching the cleanup script
+# uses); fall back to whichever agent holds this demo's authorization.
+existing = ""
+list_code, listing = call("GET", url + "?pageSize=100")
+if list_code == 200:
+    for a in listing.get("agents", []):
+        try:
+            card = json.loads((a.get("a2aAgentDefinition") or {}).get("jsonAgentCard") or "{}")
+        except Exception:
+            card = {}
+        if card.get("name") == agent_name:
+            existing = a.get("name", "")
+            break
+    if not existing and auth_path:
+        for a in listing.get("agents", []):
+            if (a.get("authorizationConfig") or {}).get("agentAuthorization", "") == auth_path:
+                existing = a.get("name", "")
+                break
 
+def print_agent_id(resource_name):
+    print("AGENT_ID:" + resource_name.split("/")[-1])
 
-except urllib.error.HTTPError as e:
-    print(f"Error registering agent: {e}", file=sys.stderr)
-    print(e.read().decode("utf-8"), file=sys.stderr)
-    sys.exit(1)
-except Exception as e:
-    print(f"Unexpected error: {e}", file=sys.stderr)
-    sys.exit(1)
+if existing:
+    patch_body = dict(data)
+    patch_body["name"] = existing
+    patch_code, resp = call("PATCH", f"https://{endpoint}/v1alpha/{existing}", patch_body)
+    if patch_code == 200:
+        print("Updated the existing agent registration (overwrite deploy):")
+        print(json.dumps(resp, indent=2))
+        print_agent_id(resp.get("name", "") or existing)
+        sys.exit(0)
+    # PATCH semantics on this v1alpha surface are not guaranteed - fall back
+    # to delete+create. NOTE: this changes the agent resource id (pinned
+    # agents / conversation-thread association in the GE UI may reset).
+    print(f"PATCH failed ({patch_code}): {resp.get('error', '')} - falling back to delete+create", file=sys.stderr)
+    del_code, del_resp = call("DELETE", f"https://{endpoint}/v1alpha/{existing}")
+    if del_code not in (200, 204):
+        print(f"DELETE of the existing agent also failed ({del_code}): {del_resp.get('error', '')}", file=sys.stderr)
+        sys.exit(1)
+
+create_code, resp = call("POST", url, data)
+if create_code == 200:
+    print("Successfully registered agent:")
+    print(json.dumps(resp, indent=2))
+    print_agent_id(resp.get("name", ""))
+    sys.exit(0)
+print(f"Error registering agent ({create_code}): {resp.get('error', '')}", file=sys.stderr)
+sys.exit(1)
 EOF
 
   if [ "$APP_COUNT" = "1" ]; then
@@ -4531,11 +5808,16 @@ EOF
     SELECTED_LOC="\${APP_LOCS[0]}"
     echo "✅ Found exactly one Gemini Enterprise app ($SELECTED_APP_ID). Automating registration..."
 
-    REG_OUTPUT=$(python3 register_agent.py "$SELECTED_LOC" "$PROJECT_NUMBER" "$SELECTED_LOC" "$SELECTED_APP_ID" "$TOKEN" "${dirName}" "$SERVICE_URL/a2a/app" "\$AGENT_DISPLAY_NAME" '${safeSummary}' "$AUTH_ID")
+    REG_OUTPUT=$(python3 register_agent.py "$SELECTED_LOC" "$PROJECT_NUMBER" "$SELECTED_LOC" "$SELECTED_APP_ID" "$TOKEN" "${dirName}" "$SERVICE_URL/a2a/app" "\$AGENT_DISPLAY_NAME" '${safeSummary}' "$AUTH_ID" 2>&1) || true
     echo "$REG_OUTPUT"
     AGENT_ID=$(echo "$REG_OUTPUT" | grep "AGENT_ID:" | cut -d':' -f2)
     rm register_agent.py
-    
+    if [ -z "\$AGENT_ID" ]; then
+      echo "⚠️  Gemini Enterprise registration failed, but the Cloud Run deployment itself is COMPLETE."
+      echo "    An existing registration of this demo (if any) keeps working against the new deployment."
+      echo "    To (re)register manually: Gemini Enterprise > Agents > Add, URL: $SERVICE_URL/a2a/app"
+    fi
+
   else
     if [ "$APP_COUNT" = "0" ]; then
       echo "⚠️ No Gemini Enterprise apps found in 'global', 'us', or 'eu'. You might need to create one first."
@@ -4560,10 +5842,15 @@ EOF
       
       echo "✅ Selected app: \${APP_DISPLAY_NAMES[\$CHOICE]}. Automating registration..."
       
-      REG_OUTPUT=$(python3 register_agent.py "\$SELECTED_LOC" "\$PROJECT_NUMBER" "\$SELECTED_LOC" "\$SELECTED_APP_ID" "\$TOKEN" "${dirName}" "\$SERVICE_URL/a2a/app" "\$AGENT_DISPLAY_NAME" '${safeSummary}' "\$AUTH_ID")
+      REG_OUTPUT=$(python3 register_agent.py "\$SELECTED_LOC" "\$PROJECT_NUMBER" "\$SELECTED_LOC" "\$SELECTED_APP_ID" "\$TOKEN" "${dirName}" "\$SERVICE_URL/a2a/app" "\$AGENT_DISPLAY_NAME" '${safeSummary}' "\$AUTH_ID" 2>&1) || true
       echo "\$REG_OUTPUT"
       AGENT_ID=$(echo "\$REG_OUTPUT" | grep "AGENT_ID:" | cut -d':' -f2)
       rm register_agent.py
+      if [ -z "\$AGENT_ID" ]; then
+        echo "⚠️  Gemini Enterprise registration failed, but the Cloud Run deployment itself is COMPLETE."
+        echo "    An existing registration of this demo (if any) keeps working against the new deployment."
+        echo "    To (re)register manually: Gemini Enterprise > Agents > Add, URL: \$SERVICE_URL/a2a/app"
+      fi
     fi
   fi
 
@@ -4638,13 +5925,28 @@ ${params.importedMcpList.map((mcp, idx) => {
   echo "🔗 Quick Access Links"
   echo "---------------------------------------------------------"
   if [ ! -z "\$AGENT_ID" ]; then
-    echo "💬 Start Chatting in Gemini Enterprise:"
-    echo "   👉 https://console.cloud.google.com/gemini-enterprise/locations/\$SELECTED_LOC/engines/\$SELECTED_APP_ID/overview/dashboard?&project=\$PROJECT_ID"
-    echo "   💡 Click the 'Preview' button at the top to launch Gemini Enterprise, then select 'Agents' from the left menu to start chatting with your deployed agent."
+    # Resolve the web app config id (cid) so the link opens the agent directly.
+    LINK_TOKEN=$(gcloud auth application-default print-access-token 2>/dev/null || gcloud auth print-access-token)
+    if [ "\$SELECTED_LOC" = "global" ]; then
+      WC_ENDPOINT="discoveryengine.googleapis.com"
+    else
+      WC_ENDPOINT="\${SELECTED_LOC}-discoveryengine.googleapis.com"
+    fi
+    CONFIG_ID=$(curl -s -H "Authorization: Bearer \$LINK_TOKEN" -H "X-Goog-User-Project: \$PROJECT_ID" \
+      "https://\$WC_ENDPOINT/v1alpha/projects/\$PROJECT_ID/locations/\$SELECTED_LOC/collections/default_collection/engines/\$SELECTED_APP_ID/widgetConfigs/default_search_widget_config" \
+      | python3 -c 'import sys, json; print(json.load(sys.stdin).get("configId", ""))' 2>/dev/null) || true
+    if [ ! -z "\$CONFIG_ID" ]; then
+      echo "💬 Start Chatting with Your Agent:"
+      echo "   👉 https://vertexaisearch.cloud.google.com/home/cid/\$CONFIG_ID/r/agent/\$AGENT_ID/session/-"
+    else
+      echo "💬 Start Chatting in Gemini Enterprise:"
+      echo "   👉 https://console.cloud.google.com/gemini-enterprise/locations/\$SELECTED_LOC/engines/\$SELECTED_APP_ID/overview/dashboard?project=\$PROJECT_ID"
+      echo "   💡 Click the 'Preview' button at the top to launch Gemini Enterprise, then select 'Agents' from the left menu to start chatting with your deployed agent."
+    fi
     echo ""
   else
     echo "💻 Gemini Enterprise Console:"
-    echo "   👉 https://console.cloud.google.com/gemini-enterprise/overview?&project=\$PROJECT_ID"
+    echo "   👉 https://console.cloud.google.com/gemini-enterprise/overview?project=\$PROJECT_ID"
     echo ""
   fi
   
@@ -4680,12 +5982,60 @@ ${params.importedMcpList.map((mcp, idx) => {
 // ===========================================
 
 /**
+ * Normalizes a target-persona object sent from the client into a plain text
+ * description safe for interpolation into LLM prompt template literals.
+ * Strips backticks, curly braces, and backslashes (see AGENTS.md rules 7/13)
+ * and caps the length. Returns '' when no persona is selected, which keeps
+ * every prompt byte-identical to the pre-persona behavior.
+ * @param {Object|null} persona - { id, label, description, custom? } or null
+ * @returns {string} Sanitized description text, or '' when absent
+ */
+// Languages offered by the research language selector in the UI. Exact
+// membership check doubles as sanitization: only these strings are ever
+// interpolated into prompts.
+const SUPPORTED_RESEARCH_LANGS_ = ['日本語', 'English', 'Deutsch', 'Français', 'Español', 'Italiano', '中文', '한국어', 'Português', 'Русский', 'Nederlands', 'Svenska', 'Suomi'];
+
+// Template Hub language codes -> the English name used when instructing a model.
+// Shared by translateTemplates() and the Magic Wand optimizer.
+const TEMPLATE_LANGS_ = {
+  en: 'English', ja: 'Japanese', de: 'German', fr: 'French', es: 'Spanish',
+  it: 'Italian', zh: 'Simplified Chinese', ko: 'Korean', pt: 'Portuguese',
+  ru: 'Russian', nl: 'Dutch', sv: 'Swedish', fi: 'Finnish'
+};
+
+/**
+ * Normalizes whichever language identifier the frontend had to hand.
+ * The Template Hub selector emits codes ('en'); the research selector and
+ * researchCompanyByDomain's detectedLanguage emit native names ('Deutsch').
+ * Returns '' for anything unrecognized, which leaves the caller on its
+ * detect-from-the-input fallback.
+ * @param {string} lang
+ * @returns {string} A language name safe to put in a prompt, or ''.
+ */
+function resolveOutputLanguage_(lang) {
+  if (typeof lang !== 'string') return '';
+  const t = lang.trim();
+  if (!t) return '';
+  if (TEMPLATE_LANGS_[t]) return TEMPLATE_LANGS_[t];
+  if (SUPPORTED_RESEARCH_LANGS_.indexOf(t) !== -1) return t;
+  return '';
+}
+
+function sanitizePersonaText_(persona) {
+  if (!persona || typeof persona !== 'object') return '';
+  const raw = String(persona.description || persona.label || '');
+  const stripRe = new RegExp('[' + String.fromCharCode(96) + '{}\\\\]', 'g');
+  return raw.replace(stripRe, '').replace(/\s+/g, ' ').trim().substring(0, 300);
+}
+
+/**
  * Researches a company by its domain name using Gemini + Google Search grounding.
  * Returns company info, business challenges, workflows, and a suggested agent goal.
  * @param {string} domain - Customer domain (e.g., "toyota.co.jp")
+ * @param {Object|null} persona - Optional target persona { id, label, description }
  * @returns {Object} Structured company research results
  */
-function researchCompanyByDomain(domain) {
+function researchCompanyByDomain(domain, persona, langOverride) {
   if (!domain || typeof domain !== 'string') {
     return { success: false, error: 'Domain is required.' };
   }
@@ -4693,7 +6043,14 @@ function researchCompanyByDomain(domain) {
   // Normalize domain
   domain = domain.trim().toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/.*$/, '');
 
-  // Determine response language from TLD
+  // Optional manual override from the UI language selector ('Auto' sends null).
+  const overrideLang = (typeof langOverride === 'string' && SUPPORTED_RESEARCH_LANGS_.indexOf(langOverride.trim()) !== -1)
+    ? langOverride.trim() : null;
+
+  // TLD map is no longer the decision mechanism (a Japanese company on a .com
+  // domain used to get English). It only seeds the fallback used when the
+  // model omits detectedLanguage in auto mode; the actual choice is made by
+  // the model from the grounded search results (HQ country / official site).
   const tldLangMap = {
     '.co.jp': '日本語', '.jp': '日本語', '.ne.jp': '日本語', '.or.jp': '日本語', '.ac.jp': '日本語',
     '.de': 'Deutsch', '.fr': 'Français', '.es': 'Español', '.it': 'Italiano',
@@ -4703,21 +6060,33 @@ function researchCompanyByDomain(domain) {
     '.com': 'English', '.io': 'English', '.ai': 'English', '.org': 'English', '.net': 'English'
   };
 
-  let responseLang = 'English';
+  let fallbackLang = 'English';
   // Match longest TLD first (e.g., .co.jp before .jp)
   const sortedTlds = Object.keys(tldLangMap).sort((a, b) => b.length - a.length);
   for (const tld of sortedTlds) {
     if (domain.endsWith(tld)) {
-      responseLang = tldLangMap[tld];
+      fallbackLang = tldLangMap[tld];
       break;
     }
   }
 
+  const langBlock = overrideLang
+    ? '**RESPONSE LANGUAGE**: Respond entirely in ' + overrideLang + '. Set "detectedLanguage" to exactly "' + overrideLang + '".'
+    : '**RESPONSE LANGUAGE (AUTO-DETECT)**: Determine the company\'s primary business language and write ALL text values in that language.\n' +
+      '- Country-code TLDs are decisive: e.g. .jp/.co.jp -> 日本語, .de -> Deutsch, .fr -> Français, .es -> Español, .it -> Italiano, .cn/.tw -> 中文, .kr -> 한국어, .br -> Português.\n' +
+      '- For generic TLDs (.com, .io, .ai, .org, .net, ...), decide from your search results: use the primary language of the company\'s headquarters country and official website. Example: a Japanese company using a .com domain MUST still be answered in 日本語.\n' +
+      '- Report your final choice in the "detectedLanguage" JSON field, picking the closest match from: ' + SUPPORTED_RESEARCH_LANGS_.join(', ') + '.';
+
+  const personaDesc = sanitizePersonaText_(persona);
+  const personaBlock = personaDesc
+    ? '\n**TARGET PERSONA (MANDATORY)**: This demo is being prepared for a specific target user: ' + personaDesc + '. Apply this throughout: when listing "workflows", prioritize workflows that this persona owns or directly depends on. The "suggestedGoal" MUST be written around this persona\'s own business process: name this role explicitly as the primary user of the AI agent, and frame the business problem, stakeholders, and KPIs from this persona\'s point of view. Render the role title naturally in the RESPONSE LANGUAGE.\n'
+    : '';
+
   const prompt = `You are a business analyst researching a company for an AI agent demo preparation.
 Research the company behind the domain "${domain}" using the latest available information from the internet.
 
-**RESPONSE LANGUAGE**: Respond entirely in ${responseLang}.
-
+${langBlock}
+${personaBlock}
 Provide the following information in a structured JSON format:
 1. **companyName**: Official company name
 2. **companySummary**: Brief company overview (industry, scale, main business areas, headquarters location) in 2-3 sentences
@@ -4733,6 +6102,9 @@ Provide the following information in a structured JSON format:
    - Describe a specific, actionable business problem that an AI agent could solve
    - Include realistic operational context (data sources, stakeholders, KPIs)
    - Follow the theme of "Autonomous Action and Core System Optimization" — the agent should detect events, analyze data, and actively update core systems
+   - Span at least two departments that share the same core-system data, and describe the hand-off between them that the agent automates. Where the business problem plausibly involves only one department, model the hand-off with an adjacent supporting function (e.g., support -> billing, support -> product quality)
+7. **quantFacts**: An object of verifiable QUANTITATIVE facts about the company for grounding synthetic demo data in real-world scale. Include ONLY facts clearly supported by your search results - omit any key you are not confident about (an empty object is fine; NEVER estimate or invent numbers). All values are strings that include the unit and, when known, the as-of year. Possible keys (all optional): "storeCount", "siteCount", "employeeCount", "annualRevenue", "mainRegions" (array of region/prefecture names ordered by weight), "productCategories" (array of the main product/service categories), "notableScale" (one free-form fact like daily shipments or member count).
+8. **detectedLanguage**: The language ALL text values in this response are written in (see RESPONSE LANGUAGE above).
 
 **IMPORTANT**:
 - Use REAL, factual information about this company. Do NOT hallucinate or invent details.
@@ -4749,14 +6121,16 @@ Output pure JSON only (no code blocks, no markdown):
     {"name": "...", "automatable": true, "reason": "..."},
     {"name": "...", "automatable": false, "reason": "..."}
   ],
-  "suggestedGoal": "..."
+  "suggestedGoal": "...",
+  "quantFacts": { "storeCount": "...", "mainRegions": ["..."] },
+  "detectedLanguage": "..."
 }`;
 
   try {
     // Direct API call with flash-lite model for speed + higher token limit
     let location = CONFIG.LOCATION || 'global';
     const host = location === 'global' ? 'aiplatform.googleapis.com' : `${location}-aiplatform.googleapis.com`;
-    const researchModel = 'gemini-3.1-flash-lite';
+    const researchModel = 'gemini-3.5-flash-lite';
     const url = `https://${host}/v1/projects/${CONFIG.PROJECT_ID}/locations/${location}/publishers/google/models/${researchModel}:generateContent`;
     
     const payload = {
@@ -4812,7 +6186,11 @@ Output pure JSON only (no code blocks, no markdown):
       industry: parsed.industry || '',
       businessChallenges: parsed.businessChallenges || [],
       workflows: parsed.workflows || [],
-      suggestedGoal: parsed.suggestedGoal
+      suggestedGoal: parsed.suggestedGoal,
+      quantFacts: parsed.quantFacts || null,
+      detectedLanguage: (typeof parsed.detectedLanguage === 'string' && parsed.detectedLanguage.trim())
+        ? parsed.detectedLanguage.trim()
+        : (overrideLang || fallbackLang)
     };
   } catch (e) {
     console.error('[RESEARCH] Error for domain ' + domain + ':', e.message);
@@ -4826,14 +6204,28 @@ Output pure JSON only (no code blocks, no markdown):
  * ensuring the Business Scenario section stays consistent with the selected workflows.
  * @param {Object} companyInfo - { companyName, industry, companySummary }
  * @param {Array} selectedWorkflows - [{ name, reason }, ...]
+ * @param {Object|null} persona - Optional target persona { id, label, description }
+ * @param {string|null} language - Explicit output language (from research detectedLanguage or the UI override)
  * @returns {Object} { success: boolean, goal: string, error?: string }
  */
-function regenerateGoalForWorkflows(companyInfo, selectedWorkflows) {
+function regenerateGoalForWorkflows(companyInfo, selectedWorkflows, persona, language) {
   if (!companyInfo || !selectedWorkflows || selectedWorkflows.length === 0) {
     return { success: false, error: 'Company info and at least one workflow are required.' };
   }
 
-  const responseLang = /[\u3000-\u9fff\uff00-\uffef]/.test(companyInfo.companySummary) ? '日本語' : 'English';
+  // Prefer the explicit language carried over from the research step; the CJK
+  // regex is only a JP/EN fallback for old callers (it loses e.g. German).
+  const responseLang = (typeof language === 'string' && SUPPORTED_RESEARCH_LANGS_.indexOf(language.trim()) !== -1)
+    ? language.trim()
+    : (/[\u3000-\u9fff\uff00-\uffef]/.test(companyInfo.companySummary) ? '日本語' : 'English');
+
+  const personaDesc = sanitizePersonaText_(persona);
+  const personaSection = personaDesc
+    ? '\n## Target Persona\nThe demo user is ' + personaDesc + '.\n'
+    : '';
+  const personaRule = personaDesc
+    ? '\n- Write the scenario from the Target Persona\'s point of view: the business problem, stakeholders, and KPIs must belong to this persona\'s own business process, and this persona must be the primary user of the AI agent. Render the role title naturally in the output language.'
+    : '';
 
   const prompt = `You are a business analyst creating an AI agent demo scenario.
 
@@ -4843,7 +6235,7 @@ Given the company and selected workflows below, write a detailed business scenar
 - Name: ${companyInfo.companyName}
 - Industry: ${companyInfo.industry}
 - Overview: ${companyInfo.companySummary}
-
+${personaSection}
 ## Selected Workflows for AI Agent Automation
 ${selectedWorkflows.map(w => `- ${w.name}: ${w.reason}`).join('\n')}
 
@@ -4853,14 +6245,15 @@ ${selectedWorkflows.map(w => `- ${w.name}: ${w.reason}`).join('\n')}
 - Describe a specific, actionable business problem that an AI agent could solve
 - Include realistic operational context (data sources, stakeholders, KPIs)
 - Theme: "Autonomous Action and Core System Optimization" — the agent should detect events, analyze data, and actively update core systems
-- Write entirely in ${responseLang}
+- Span at least two departments that share the same core-system data, and describe the hand-off between them that the agent automates (if only one department plausibly applies, use an adjacent supporting function such as support -> billing)
+- Write entirely in ${responseLang}${personaRule}
 
 Output ONLY the scenario text. No JSON, no code blocks, no explanations.`;
 
   try {
     let location = CONFIG.LOCATION || 'global';
     const host = location === 'global' ? 'aiplatform.googleapis.com' : `${location}-aiplatform.googleapis.com`;
-    const model = 'gemini-3.1-flash-lite';
+    const model = 'gemini-3.5-flash-lite';
     const url = `https://${host}/v1/projects/${CONFIG.PROJECT_ID}/locations/${location}/publishers/google/models/${model}:generateContent`;
 
     const payload = {
@@ -4911,7 +6304,7 @@ function callVertexAI(prompt) {
 function callVertexAIWithSearch(prompt) {
   let location = CONFIG.LOCATION || 'global';
   const host = location === 'global' ? 'aiplatform.googleapis.com' : `${location}-aiplatform.googleapis.com`;
-  const searchModel = 'gemini-3.1-flash-lite';
+  const searchModel = 'gemini-3.5-flash-lite';
   const url = `https://${host}/v1/projects/${CONFIG.PROJECT_ID}/locations/${location}/publishers/google/models/${searchModel}:generateContent`;
   
   const payload = {
@@ -5122,7 +6515,7 @@ function classifyDemoTaxonomy_(userGoal, aiSummary, businessInstruction) {
 function callTaxonomyModel_(userGoal, aiSummary, businessInstruction, allowed) {
   const location = CONFIG.LOCATION || 'global';
   const host = location === 'global' ? 'aiplatform.googleapis.com' : `${location}-aiplatform.googleapis.com`;
-  const model = 'gemini-3.1-flash-lite';
+  const model = 'gemini-3.5-flash-lite';
   const url = `https://${host}/v1/projects/${CONFIG.PROJECT_ID}/locations/${location}/publishers/google/models/${model}:generateContent`;
 
   const fields = Object.keys(allowed); // subset of ['industry','persona','useCase']
@@ -5427,6 +6820,241 @@ function parseGithubUrl(url) {
   return { owner: match[1], repo: match[2].replace(/\.git$/, "") };
 }
 
+// ===========================================
+// Managed remote MCP servers (v11.46)
+// ===========================================
+// A managed remote MCP server is reached over Streamable HTTP at a vendor URL
+// (https://mcp.notion.com/mcp) instead of being cloned and run as a sidecar.
+// Everything below keys off a short slug derived from the server name, so one
+// demo can carry several remote servers without Secret Manager / env var /
+// ADK tool-name collisions.
+//
+// auth_type values for type:'remote' entries:
+//   'none'          - endpoint answers unauthenticated, nothing to provision
+//   'bearer_token'  - user pastes a long-lived token during setup
+//   'oauth2_dcr'    - RFC 7591 dynamic client registration + RFC 7636 PKCE,
+//                     no manual app creation (Notion)
+//   'oauth2_manual' - OAuth but the server has no registration_endpoint, so the
+//                     user brings a client_id (+ secret) from a manually
+//                     created app
+//   'oauth2_slack'  - legacy Slack-specific flow, predates the generic path
+
+function remoteMcpSlug_(mcp, idx) {
+  let base = (mcp && mcp.name) ? String(mcp.name) : '';
+  if (!base && mcp && mcp.endpoint_url) {
+    base = String(mcp.endpoint_url).replace(/^https?:\/\//i, '').split('/')[0];
+  }
+  base = base.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  if (!base) base = 'remote' + (idx || 0);
+  return base.substring(0, 24).replace(/-+$/, '');
+}
+
+function remoteMcpEnvKey_(mcp, idx) {
+  return 'RMCP_' + remoteMcpSlug_(mcp, idx).toUpperCase().replace(/-/g, '_') + '_AUTH';
+}
+
+function remoteMcpSecretName_(dirName, mcp, idx) {
+  return dirName + '-rmcp-' + remoteMcpSlug_(mcp, idx);
+}
+
+// Remote servers whose credentials the setup script writes to Secret Manager as
+// a single JSON blob, which the agent then reads from one env var.
+function remoteMcpUsesAuthBlob_(mcp) {
+  return !!mcp && mcp.type === 'remote' &&
+         (mcp.auth_type === 'oauth2_dcr' || mcp.auth_type === 'oauth2_manual' ||
+          mcp.auth_type === 'bearer_token');
+}
+
+// Remote servers handled by the generic get_remote_mcp_toolsets() in tools.py.
+// Slack keeps its own toolset function so the working flow stays untouched.
+function remoteMcpIsGeneric_(mcp) {
+  return !!mcp && mcp.type === 'remote' && mcp.auth_type !== 'oauth2_slack';
+}
+
+function remoteMcpJsonFetch_(url, options) {
+  try {
+    const resp = UrlFetchApp.fetch(url, Object.assign({
+      muteHttpExceptions: true,
+      followRedirects: true,
+      validateHttpsCertificates: true
+    }, options || {}));
+    const code = resp.getResponseCode();
+    const text = resp.getContentText();
+    let json = null;
+    if (text) {
+      // Streamable HTTP servers may answer with an SSE frame rather than plain
+      // JSON. Both carry the same JSON-RPC payload.
+      const sse = text.match(/^data:\s*(\{[\s\S]*)$/m);
+      try { json = JSON.parse(sse ? sse[1] : text); } catch (e) { json = null; }
+    }
+    return { code: code, text: text, json: json, headers: resp.getAllHeaders() };
+  } catch (e) {
+    return { code: 0, text: String(e), json: null, headers: {} };
+  }
+}
+
+/**
+ * Probes a managed remote MCP endpoint and reports how a generated demo can
+ * authenticate against it. Backs the "Remote MCP URL" import tab.
+ *
+ * Discovery order: unauthenticated initialize -> RFC 9728 protected resource
+ * metadata -> RFC 8414 authorization server metadata -> RFC 7591 registration
+ * endpoint. The result decides which credential flow the setup script emits.
+ */
+function probeRemoteMcpServer(endpointUrl) {
+  try {
+    const url = String(endpointUrl || '').trim().replace(/\/+$/, '');
+    const parts = url.match(/^(https:\/\/[^\/]+)(\/.*)?$/i);
+    if (!parts) {
+      return { success: false, message: 'Enter a full https:// MCP endpoint URL (for example https://mcp.notion.com/mcp).' };
+    }
+    const origin = parts[1];
+    const path = parts[2] || '';
+    const host = origin.replace(/^https:\/\//i, '');
+
+    const skip = { mcp: 1, www: 1, api: 1, com: 1, io: 1, ai: 1, app: 1, net: 1, org: 1, dev: 1, co: 1 };
+    const labels = host.split('.').filter(function(p) { return !skip[p]; });
+    const rawName = labels.length ? labels[labels.length - 1] : host;
+    const name = rawName.charAt(0).toUpperCase() + rawName.slice(1);
+
+    const out = {
+      is_supported: true,
+      type: 'remote',
+      name: name,
+      endpoint_url: url,
+      docs_url: origin,
+      language: 'managed',
+      transport_mode: 'streamable_http',
+      auth_type: 'none',
+      auth_summary: '',
+      registration_endpoint: '',
+      authorization_endpoint: '',
+      token_endpoint: '',
+      capabilities: [],
+      required_env_vars: [],
+      warnings: []
+    };
+
+    // 1. Does the endpoint answer without credentials?
+    const init = remoteMcpJsonFetch_(url, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'Accept': 'application/json, text/event-stream' },
+      payload: JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'ge-demo-generator', version: '1' }
+        }
+      })
+    });
+
+    if (init.code === 0) {
+      return { success: false, message: 'Could not reach ' + url + '. Check the URL and that the server is public. (' + init.text + ')' };
+    }
+
+    if (init.code >= 200 && init.code < 300) {
+      out.auth_type = 'none';
+      out.auth_summary = 'No authentication required - the server answered an unauthenticated initialize.';
+      const listed = remoteMcpProbeTools_(url, init);
+      if (listed.length) out.capabilities = listed;
+      return { success: true, data: out };
+    }
+
+    if (init.code !== 401 && init.code !== 403) {
+      out.warnings.push('The endpoint returned HTTP ' + init.code + ' for initialize. Continuing with OAuth discovery, but double-check the URL.');
+    }
+
+    // 2. RFC 9728 protected resource metadata. Prefer the location the server
+    //    advertised in WWW-Authenticate, then the path-scoped default.
+    const authenticateHeader = init.headers['WWW-Authenticate'] || init.headers['www-authenticate'] || '';
+    const advertised = String(authenticateHeader).match(/resource_metadata="([^"]+)"/);
+    const prmCandidates = [];
+    if (advertised) prmCandidates.push(advertised[1]);
+    prmCandidates.push(origin + '/.well-known/oauth-protected-resource' + path);
+    prmCandidates.push(origin + '/.well-known/oauth-protected-resource');
+
+    let authServer = origin;
+    for (let i = 0; i < prmCandidates.length; i++) {
+      const prm = remoteMcpJsonFetch_(prmCandidates[i]);
+      if (prm.json && prm.json.authorization_servers && prm.json.authorization_servers.length) {
+        authServer = String(prm.json.authorization_servers[0]).replace(/\/+$/, '');
+        if (prm.json.resource_name) out.name = prm.json.resource_name.replace(/\s*\(beta\)\s*$/i, '').trim() || out.name;
+        break;
+      }
+    }
+
+    // 3. RFC 8414 authorization server metadata.
+    const asCandidates = [
+      authServer + '/.well-known/oauth-authorization-server' + path,
+      authServer + '/.well-known/oauth-authorization-server',
+      authServer + '/.well-known/openid-configuration'
+    ];
+    let meta = null;
+    for (let i = 0; i < asCandidates.length; i++) {
+      const res = remoteMcpJsonFetch_(asCandidates[i]);
+      if (res.json && res.json.token_endpoint) { meta = res.json; break; }
+    }
+
+    if (!meta) {
+      out.auth_type = 'bearer_token';
+      out.auth_summary = 'The server requires a credential but publishes no OAuth metadata. You will paste a long-lived API token during setup.';
+      out.warnings.push('No RFC 8414 metadata found at ' + authServer + '. Falling back to a static bearer token.');
+      return { success: true, data: out };
+    }
+
+    out.authorization_endpoint = meta.authorization_endpoint || '';
+    out.token_endpoint = meta.token_endpoint || '';
+    out.registration_endpoint = meta.registration_endpoint || '';
+
+    const pkce = meta.code_challenge_methods_supported || [];
+    if (pkce.length && pkce.indexOf('S256') === -1) {
+      out.warnings.push('The server does not advertise PKCE S256; setup will still request it.');
+    }
+    if ((meta.grant_types_supported || []).indexOf('refresh_token') === -1) {
+      out.warnings.push('No refresh_token grant advertised - the demo may need re-authorization when the access token expires.');
+    }
+
+    if (out.registration_endpoint) {
+      out.auth_type = 'oauth2_dcr';
+      out.auth_summary = 'OAuth 2.1 with dynamic client registration. Setup registers a client automatically - no app to create by hand.';
+    } else {
+      out.auth_type = 'oauth2_manual';
+      out.auth_summary = 'OAuth 2.1 without dynamic client registration. You will need a client ID (and secret) from an app you register with the provider.';
+      out.required_env_vars = [
+        { key: 'OAUTH_CLIENT_ID', description: 'OAuth client ID from the provider', is_secret: false, is_required: true },
+        { key: 'OAUTH_CLIENT_SECRET', description: 'OAuth client secret (leave blank for a public client)', is_secret: true, is_required: false }
+      ];
+    }
+    return { success: true, data: out };
+
+  } catch (error) {
+    console.error(error);
+    return { success: false, message: error.toString() };
+  }
+}
+
+// Best-effort tools/list against a server that needs no credentials. Returns
+// tool names for the demo plan summary; failure is not an error.
+function remoteMcpProbeTools_(url, init) {
+  try {
+    const sessionId = (init.headers && (init.headers['Mcp-Session-Id'] || init.headers['mcp-session-id'])) || '';
+    const headers = { 'Accept': 'application/json, text/event-stream' };
+    if (sessionId) headers['Mcp-Session-Id'] = sessionId;
+    const res = remoteMcpJsonFetch_(url, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: headers,
+      payload: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
+    });
+    const tools = (res.json && res.json.result && res.json.result.tools) || [];
+    return tools.slice(0, 12).map(function(t) { return t.name; }).filter(Boolean);
+  } catch (e) {
+    return [];
+  }
+}
+
 function getGithubHeaders() {
   const headers = {};
   if (CONFIG.GITHUB_TOKEN) {
@@ -5498,7 +7126,7 @@ function callGeminiApi(contextContent, url) {
   const region = CONFIG.LOCATION || 'global';
 
   const host = region === 'global' ? 'aiplatform.googleapis.com' : `${region}-aiplatform.googleapis.com`;
-  const endpoint = `https://${host}/v1/projects/${projectId}/locations/${region}/publishers/google/models/gemini-3.1-flash-lite:generateContent`;
+  const endpoint = `https://${host}/v1/projects/${projectId}/locations/${region}/publishers/google/models/gemini-3.5-flash-lite:generateContent`;
 
   const prompt = `You are an AI expert determining if custom MCP Servers can be safely provisioned on standard Cloud Run.
 Review the collected files enclosed in the <REPOSITORY_CONTEXT> tag below.
@@ -5628,7 +7256,7 @@ ${contextContent}
 }
 
 /**
- * Service endpoint for Magic Wand. Expands and refines scenario statement using gemini-3.1-flash-lite.
+ * Service endpoint for Magic Wand. Expands and refines scenario statement using gemini-3.5-flash-lite.
  * Robustly handles raw inputs, templates, and edited Markdown scenarios from domain research.
  * Features 3-retry loop with exponential backoff to handle transient rate limits (429) and server errors (5xx).
  * @param {string} rawGoal - The user's current scenario text.
@@ -5637,7 +7265,7 @@ ${contextContent}
 function optimizeGoalWithMagicWand(rawGoal, capabilityOpts) {
   let location = CONFIG.LOCATION || 'global';
   const host = location === 'global' ? 'aiplatform.googleapis.com' : `${location}-aiplatform.googleapis.com`;
-  const model = 'gemini-3.1-flash-lite';
+  const model = 'gemini-3.5-flash-lite';
   const url = `https://${host}/v1/projects/${CONFIG.PROJECT_ID}/locations/${location}/publishers/google/models/${model}:generateContent`;
 
   // Capability-aware optimization: when the Managed Agent toggle is on, the
@@ -5651,6 +7279,44 @@ function optimizeGoalWithMagicWand(rawGoal, capabilityOpts) {
   const managedAgentRequirement = _capManaged ? `
 4.  **Autonomous Strategic Initiative (MANDATORY)**: The Operational Challenge MUST additionally define ONE standing long-horizon mission suited to a fully autonomous agent working for tens of minutes: live external research (industry trends, competitor moves, market prices, regulations) combined with the company's own data through real quantitative analysis, culminating in an executive-grade deliverable (a board presentation, a formal proposal document, a PDF report, or an interactive briefing page${ _capWorkspace ? ', delivered into the team workspace - saved to shared drives, summarized in a draft email, or posted to the team chat' : ''}). State the business question it answers, the expected deliverable and its audience, and the quality bar (real numbers, cited sources, decision-ready structure). Keep it in business language - no tool or product names.` : '';
 
+  // Optional target-persona override: when the demo creator picked a persona in
+  // the UI, the optimized scenario must be framed around that role instead of
+  // letting the model invent one. Empty string = prompt unchanged.
+  const _personaDesc = sanitizePersonaText_(_caps.persona);
+  const personaRequirement = _personaDesc
+    ? '\n' + (_capManaged ? '5' : '4') + '.  **Target Persona Override (MANDATORY)**: This demo targets a specific user: ' + _personaDesc + '. Header 2 (Target Role) MUST be a single specific, professional job title matching this persona, translated naturally into the detected output language. The Business Scenario (Header 3) and the Operational Challenge (Header 4) MUST be framed around this persona\'s own business process, daily decisions, and KPIs. If the input text implies or already states a different role (including an existing Target Role header from prior research or a template), the persona specified here takes precedence: REPLACE that role and reframe the scenario around this persona. Before returning, verify the Target Role matches this persona; if it does not, rewrite it.'
+    : '';
+
+  // Persona must also win inside Requirement 1 itself: the generic Header 2
+  // instruction ("identify a job title") otherwise competes with the trailing
+  // override and flash-lite sometimes follows the earlier instruction or keeps
+  // a role already present in the input.
+  const header2Instruction = _personaDesc
+    ? '**Header 2 (Role)**: MUST be a single specific, professional job title matching this target persona: ' + _personaDesc + '. Do NOT keep or invent a different role, even if the input already names one.'
+    : '**Header 2 (Role)**: Identify a specific, professional job title appropriate to the role.';
+
+  // Output language. This used to be a four-clause "detect the input language"
+  // rule that enumerated candidate languages and leaned on negations ("you MUST
+  // NOT output in that associated language unless..."). Measured against
+  // gemini-3.5-flash-lite with an English Manhattan-retail scenario, it
+  // returned fully German output in 2 of 5 runs and a German/English mix in a
+  // third: handed a menu of languages, the model occasionally picks one off it.
+  // The caller now states the language, so there is nothing to detect. Stating
+  // it positively and once holds English in 8 of 8 runs.
+  //
+  // Note the language given here wins outright. An earlier draft added "unless
+  // the input is written in another language, then use that" as a safety net;
+  // it was measured and the model ignored it in 6 of 6 runs, so it is left out
+  // rather than kept as a clause that reads like coverage and provides none.
+  // The frontend is responsible for passing the right language: the Template
+  // Hub selector normally, the research language while research is in play.
+  const _outLang = resolveOutputLanguage_(_caps.language);
+  const languageRule = _outLang
+    ? `**OUTPUT LANGUAGE (MANDATORY)**: Write the entire output in ${_outLang}. This includes the four section headers, which must be the natural, professional ${_outLang} equivalents of Title / Target Role / Business Scenario / Operational Challenge. Company names, place names, currency units, and business terminology must all suit the ${_outLang} business context.
+`
+    : `**OUTPUT LANGUAGE (MANDATORY)**: Write the entire output in the same language the sentences of the \"Input to Optimize\" are written in, headers included. Company names, brands, and place names appearing in the input do not decide this - only the language those sentences are written in does.
+`;
+
   const prompt = `You are an expert prompt engineer and business analyst.
 Your task is to take a raw, simple, or loosely defined business scenario, OR a partially structured business scenario (which might contain company details and selected target workflows from prior research), and optimize/expand it into a **perfectly structured, high-density professional Business Scenario prompt** in Markdown format.
 
@@ -5659,29 +7325,25 @@ Input to Optimize:
 ${rawGoal}
 \"\"\"
 
-**CRITICAL MULTILINGUAL RULE (MANDATORY)**: 
-1. **Language Detection**: Analyze the \"Input to Optimize\" above and detect its primary language (e.g., English, Japanese, German, French, Spanish, Chinese, Korean, etc.).
-2. **Output Language Consistency**: You MUST generate the entire optimized Markdown output in the EXACT SAME language and script as the input. Even if the companies, brands, or locations mentioned in the input are culturally or geographically associated with a specific country or language, you MUST NOT output in that associated language unless the actual input text itself is written using that language's script. Always strictly match the literal language and script of the input text.
-3. **Header Translation**: You MUST translate the four standard section headers (Title, Target Role, Business Scenario, Operational Challenge) to match the detected language naturally and professionally. Do NOT leave headers in English if the input is in another language, and do NOT translate them to Japanese/English if the input is in a third language.
-4. **Examples Localization**: Locally adapt all names, currency units, and business terminology in the instructions to match the detected language's cultural context (e.g., use JPY/Japanese names for Japanese, EUR/European names for German/French, USD/English names for English).
-
+${languageRule}
 Requirements for the Structured Output:
-1.  **Structure Integrity**: Ensure the output contains exactly the four translated Markdown headers defined above.
+1.  **Structure Integrity**: Ensure the output contains exactly the four Markdown headers named above, in the output language.
     - **Header 1 (Title)**: If the input already has a company name and industry (e.g., '# SMCC (Finance)'), KEEP and preserve it. If not, create a realistic company name and vertical appropriate to the language context.
-    - **Header 2 (Role)**: Identify a specific, professional job title appropriate to the role.
+    - ${header2Instruction}
     - **Header 3 (Scenario)**: Provide a rich, realistic business context. If the input already has a scenario, expand it with realistic domain details, KPIs, and background.
     - **Header 4 (Challenge)**: Describe a clear, high-value operational challenge for an autonomous AI agent. It MUST specify:
         - A clear trigger event.
         - Explicit business rules and numeric thresholds appropriate to the domain (e.g., CPA limit, price discrepancy threshold).
         - Clear conditional paths (what is auto-process vs. what requires human approval).
         - Data systems involved (BigQuery/external files, Firestore operational database, Google Sheets).
+        - **Cross-Departmental Span (MANDATORY)**: The operational challenge MUST span at least two departments that share the same core-system data, and describe the hand-off between them that the agent automates. Where the business problem plausibly involves only one department, model the hand-off with an adjacent supporting function (e.g., support -> billing, support -> product quality).
         - **High-fidelity Assets & Multi-modal Integration**: Intelligently design the challenge to utilize the platform's asset generation capabilities:
             1. **Visual/HITL Triggers**: If the workflow involves any paper forms, manual applications, receipts, shipping box damages, visual inspection anomalies, or legacy physical processes, explicitly mandate a **JPEG image asset** (e.g. handwritten fax order, scanned invoice, damaged package photograph) as the primary trigger, requiring the agent to use multimodal vision before routing to Firestore for Human-in-the-Loop (HITL) manager approval.
             2. **Structured Ledgers**: Integrate transactional logs, excel data dumps, or raw CSV exports as **Excel/CSV/TSV files** that the agent must parse (using TSV/CSV delimiter logic) and reconcile against the DB.
             3. **Executive Reports & Interactive Cards**: Design the workflow to output professional, structured reports (saved to the operational database/Firestore) and rich interactive UI cards (using A2UI) as the final outcome or human review package.
         *NOTE*: If the input already lists target workflows or specific steps, respect them and build the operational challenge specifically around those workflows.
 2.  **Operational/Database Focus**: ALWAYS frame the scenario as a database-driven workflow where the agent reads from analytical sources (BigQuery/external files) and **writes back status updates, high-risk alerts, or proposed changes to the operational database (Firestore)** to keep the real-time console updated.
-3.  **No Fictional Placeholders**: Use realistic brand names, locations, and values appropriate to the language context. Do NOT use generic placeholders like \"Product A\", \"Company XYZ\", etc.${managedAgentRequirement}
+3.  **No Fictional Placeholders**: Use realistic brand names, locations, and values appropriate to the language context. Do NOT use generic placeholders like \"Product A\", \"Company XYZ\", etc.${managedAgentRequirement}${personaRequirement}
 
 Return ONLY the raw Markdown text in the detected language. Do not include any code block wrappers (triple backticks), code fences, or preamble.`;
 
@@ -5731,3 +7393,60 @@ Return ONLY the raw Markdown text in the detected language. Do not include any c
   return { success: false, error: lastError ? lastError.message : "AI Optimization failed after retries" };
 }
 
+
+/**
+ * Translates Template Hub entries into a target language for display.
+ * Ported from GE Demo Generator Lite: the frontend ships English-only data
+ * and asks the backend for translations on demand, so non-ASCII translations
+ * never live in the inline frontend JS (which would break the GAS minifier).
+ * Entries with an empty "text" are category labels (industries/job functions).
+ * @param {string} lang - Target language code (en/ja/de/fr/es/it/zh/ko/pt/ru/nl/sv/fi)
+ * @param {Array} items - [{ label, text }]
+ * @returns {Object} { success, items } same length/order translated; originals on failure.
+ */
+function translateTemplates(lang, items) {
+  const target = TEMPLATE_LANGS_[lang];
+  if (!target || lang === 'en') return { success: true, items: items || [] };
+  if (!items || !items.length) return { success: true, items: [] };
+
+  const prompt =
+    'Translate the "label" and "text" of each entry below into ' + target + '. ' +
+    'Keep it natural and professional (business demo scenario titles, descriptions, and category names). ' +
+    'Entries with an empty "text" are category labels - translate only their "label" and keep "text" as an empty string. ' +
+    'Return ONLY a JSON array of objects with "label" and "text", in the SAME order and SAME length as the input. ' +
+    'Do not add or remove entries.\n\nINPUT:\n' +
+    JSON.stringify(items.map(function (i) { return { label: String(i.label || ''), text: String(i.text || '') }; }));
+
+  try {
+    const location = CONFIG.LOCATION || 'global';
+    const host = location === 'global' ? 'aiplatform.googleapis.com' : location + '-aiplatform.googleapis.com';
+    const model = 'gemini-3.5-flash-lite';
+    const url = 'https://' + host + '/v1/projects/' + CONFIG.PROJECT_ID + '/locations/' + location + '/publishers/google/models/' + model + ':generateContent';
+    const payload = {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 65535 }
+    };
+    const response = UrlFetchApp.fetch(url, {
+      method: 'POST', contentType: 'application/json',
+      headers: { 'Authorization': 'Bearer ' + ScriptApp.getOAuthToken() },
+      payload: JSON.stringify(payload), muteHttpExceptions: true
+    });
+    if (response.getResponseCode() !== 200) throw new Error('Translate Error: ' + response.getContentText().substring(0, 200));
+    const candidate = JSON.parse(response.getContentText()).candidates[0];
+    const text = candidate.content.parts.filter(function (p) { return p.text; }).map(function (p) { return p.text; }).join('');
+    let jsonStr = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    let arr;
+    try {
+      arr = JSON.parse(jsonStr);
+    } catch (parseErr) {
+      const m = jsonStr.match(/\[[\s\S]*\]/);
+      if (!m) throw new Error('No JSON array in translation response');
+      arr = JSON.parse(m[0]);
+    }
+    if (!Array.isArray(arr) || arr.length !== items.length) throw new Error('Length mismatch: got ' + (arr && arr.length));
+    return { success: true, items: arr };
+  } catch (e) {
+    console.warn('[TRANSLATE] ' + e.message);
+    return { success: false, items: items, error: e.message };
+  }
+}

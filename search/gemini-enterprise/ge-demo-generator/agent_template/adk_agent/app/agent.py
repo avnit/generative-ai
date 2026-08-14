@@ -174,12 +174,34 @@ def _safe_dereference_schema(schema: dict) -> dict:
                 elif node[key]:
                     del node[key]
                     node.setdefault("type", "string")
-        # Process children recursively
-        for k, v in list(node.items()):
-            if isinstance(v, dict):
-                node[k] = _ensure_types(v)
-            elif isinstance(v, list):
-                node[k] = [_ensure_types(i) if isinstance(i, dict) else i for i in v]
+        # Recurse into the positions that actually hold subschemas (v11.48).
+        # The previous version walked EVERY dict value, so it also walked the
+        # "properties" MAP as if the map itself were a schema node. For a tool
+        # with a property literally named "properties" (Notion create-pages /
+        # update-page) that map then looked like a node whose "properties" key
+        # held the real subschema, and the shorthand fixup below rewrote that
+        # subschema's own "type": "object" and "description": "..." strings
+        # into {"type": "object"} / {"type": "<the description>"} dicts. The
+        # declaration then failed _ExtendedJSONSchema validation and every
+        # turn died with "Dynamic node root_agent failed" -- no agent reply.
+        # Same hazard for a property named "items", "enum" or "default": the
+        # type inference at the end of this function would fire on the map.
+        for _map_key in ("properties", "$defs", "definitions", "patternProperties"):
+            _map_val = node.get(_map_key)
+            if isinstance(_map_val, dict):
+                for _sub_name, _sub in list(_map_val.items()):
+                    if isinstance(_sub, dict):
+                        _map_val[_sub_name] = _ensure_types(_sub)
+        for _one_key in ("items", "additionalProperties", "propertyNames", "not", "contains"):
+            _one_val = node.get(_one_key)
+            if isinstance(_one_val, dict):
+                node[_one_key] = _ensure_types(_one_val)
+            elif isinstance(_one_val, list):
+                node[_one_key] = [_ensure_types(i) if isinstance(i, dict) else i for i in _one_val]
+        for _list_key in ("anyOf", "oneOf", "allOf", "prefixItems"):
+            _list_val = node.get(_list_key)
+            if isinstance(_list_val, list):
+                node[_list_key] = [_ensure_types(i) if isinstance(i, dict) else i for i in _list_val]
         # Ensure every property in 'properties' is a valid schema dict
         if "properties" in node and isinstance(node["properties"], dict):
             for prop_name, prop_schema in list(node["properties"].items()):
@@ -233,6 +255,7 @@ bigquery_toolset = tools.get_bigquery_mcp_toolset()
 firestore_toolset = tools.get_firestore_mcp_toolset()
 knowledge_catalog_toolset = tools.get_knowledge_catalog_mcp_toolset()
 custom_mcp_toolsets = tools.get_custom_mcp_toolsets()
+remote_mcp_toolsets = tools.get_remote_mcp_toolsets()
 slack_mcp_toolset = tools.get_slack_mcp_toolset()
 
 
@@ -304,6 +327,17 @@ where each step's OUTPUT becomes the next step's INPUT. You MUST:
 - Handle partial failures (mark failed step, report what succeeded, continue or stop)
 - Model workflows as BUSINESS PROCESSES: each step maps to a real organizational
   function (data collection, risk assessment, decision making, execution, audit)
+- ORGANIZATIONAL ACTORS: name the department or role that owns each step in the
+  real-world process (e.g., procurement -> warehouse -> accounts payable -> treasury).
+  A hand-off between departments is a STATE TRANSITION you perform on behalf of the
+  sending department and make visible to the receiving one.
+- PROCESS STATE & AUDIT TRAIL: whenever you move an item across a department
+  boundary or change its workflow status, ALSO update its current_department and
+  next_department fields (when the schema has them) and append one entry to its
+  history array containing: timestamp, actor, action, approver when a human
+  approved, and evidence_ids listing the record IDs you consulted. Append only -
+  never overwrite existing history entries.
+
 - ANALYSIS DEPTH at CLASSIFY step: do NOT use simple threshold checks alone.
   Cross-reference multiple data dimensions, calculate composite scores, and
   explain the classification logic in plain language so stakeholders can verify
@@ -475,6 +509,8 @@ CRITICAL OPERATIONAL RULES:
     * For database updates in BigQuery or Firestore (insert/update/delete/merge): You MUST present a confirmation card with <a2ui-json> tags showing before/after data and approve/reject Buttons. NEVER ask for confirmation in plain text.
     * BATCH APPROVAL SELECTION (CRITICAL): When the confirmation covers MULTIPLE proposed items (e.g. a batch of draft orders), the card MUST let the user choose WHICH items to approve — use a MultipleChoice (variant: "checkbox", maxAllowedSelections = item count, selections bound to a /form path) or per-row CheckBox components, with the confirm Button's action context carrying the selected values. All-or-nothing batch confirmations are FORBIDDEN when the items are independently actionable.
     * At the END of EVERY response, you MUST append suggestion chips in a separate <a2ui-json> block with surfaceId "suggestions" containing 3-4 contextual follow-up Buttons. The chip block MUST be COMPLETE: include BOTH the beginRendering message AND the surfaceUpdate message with all Button components in the SAME block — never emit beginRendering alone. NEVER write any plain text or markdown headers (like "Next Actions", "💡 Next Actions", or other localized header equivalent) before the suggestions block; the system will automatically render the appropriate header. NEVER nest components inside a Button's 'child' property; 'child' MUST always be a flat string pointing to the ID of a separately defined Text component, and that Text component MUST be included in the SAME surfaceUpdate components array — a Button whose label Text is missing renders as a BLANK button.
+    * EVERY CARD MUST BE COMPLETE (CRITICAL — applies to ALL surfaces, not just suggestions): beginRendering only OPENS an empty surface; the components arrive via surfaceUpdate. EVERY <a2ui-json> block MUST contain BOTH the beginRendering message AND the surfaceUpdate message with the full component tree for that same surfaceId, in the SAME block. A dataModelUpdate is NOT a substitute — emitting [beginRendering, dataModelUpdate] and then moving on to the next block renders NOTHING and the user sees only your prose. This is the most common cause of a silently missing card: before closing any <a2ui-json> block, confirm it contains a surfaceUpdate whose components array defines the root id named in beginRendering.
+    * ACTION CONTEXT KEYS MUST NOT COLLIDE WITH COMPONENT IDS (CRITICAL): in a Button action's "context", every "key" MUST differ from every component "id" in the same card. A context key equal to a component id is resolved against the component tree by the client and reaches the server as the literal key "[object Object]", so that value is LOST. Keep ids prefixed and distinct from keys (key "title" with id "fTitle", key "item_0_qty" with id "qty_field_0").
     * If you are unsure whether to use A2UI, USE IT. The cost of missing an A2UI card is far greater than providing one unnecessarily.
     * CONTEXT-AWARE ELEMENT SELECTION (CRITICAL): Choose the most appropriate A2UI element for each piece of content. Refer to the A2UI schema examples provided in your system prompt. General guidelines:
       - Tabular data (query results, comparisons, rankings): Use DataTable or structured cards with rows and columns. Never dump raw text tables.
@@ -554,7 +590,7 @@ CRITICAL OPERATIONAL RULES:
       - When multiple reference tables are relevant, join ALL of them. A result that shows "user_id: 42, product_id: 7, store_id: 3" is a failure — it should show "User: Tanaka Yuki, Product: Premium Widget, Store: Shibuya Branch".
       - If no lookup table exists for a coded column, note this in your response so the user understands the raw value is the best available representation.
 - EXECUTION FLOW: 
-    * REACTIVE BEHAVIOR: Always wait for a specific user request or question before starting data analysis or tool execution. Respond to greetings with a friendly message and a brief offer of help.
+    * REACTIVE BEHAVIOR: Always wait for a specific user request or question before starting data analysis or tool execution. Respond to greetings with a friendly message and a brief offer of help. Once the user HAS given one clear request, carry the workflow autonomously through all its steps up to the next human-approval gate without asking step-by-step confirmations; at the gate, always present the decision with evidence and wait.
     * MULTI-STEP PLANNING: For complex requests, summarize your planned steps in 1-2 sentences before starting the first tool execution. This keeps the user informed of your reasoning path.
     * RANGE QUERIES & DISCOVERY (STRICT RULE): If you need to analyze a time range (e.g., 'first two weeks') or discover unique values for a column, you MUST query ONLY THE SMALLEST PRACTICAL SUBSET (e.g., first day or LIMIT 10) first to verify data density and schema. DO NOT 'gulp' large ranges or entire columns in a single response, as this crashes the data pipe.
     * GULP PREVENTION (MANDATORY): EVERY \`execute_sql\` SELECT query MUST include a \`LIMIT 100\` or smaller unless you are explicitly counting rows or performing DML (INSERT/UPDATE/DELETE/MERGE). Never attempt to retrieve thousands of rows at once.
@@ -592,10 +628,21 @@ gen_instruction = "\n" + _read_generated_instruction()
 # --- Instruction sections for optional toolsets (replaced below) ---
 _custom_mcp_sections = ""
 for _mcp_i, _mcp in enumerate(tools.get_mcp_config()):
-    if _mcp.get("type") == "remote":
+    if _mcp.get("type") == "remote" and _mcp.get("auth_type") == "oauth2_slack":
         _custom_mcp_sections += (str(4 + _mcp_i) + ". **Slack MCP Toolset**: Search channels & messages, send messages, manage canvases, and access user profiles.\n"
                                  "   - Available Tools: Dynamically discovered at runtime from Slack MCP Server.\n"
                                  "   - Use this toolset for queries about Slack messages, channels, users, and canvases.\n")
+    elif _mcp.get("type") == "remote":
+        # Managed remote MCP server. Tool names are prefixed with the server
+        # slug so the model can tell several remote toolsets apart.
+        _rm_name = _mcp.get("name") or "Remote MCP"
+        _rm_caps = ", ".join(_mcp.get("capabilities") or []) or "Dynamically discovered at runtime."
+        _rm_desc = _mcp.get("description") or ("Access data and actions in the " + _rm_name + " MCP server.")
+        _custom_mcp_sections += (str(4 + _mcp_i) + ". **" + _rm_name + " MCP Toolset** (managed remote server at " +
+                                 _mcp.get("endpoint_url", "") + "): " + _rm_desc + "\n"
+                                 "   - Available Tools: " + _rm_caps + "\n"
+                                 "   - Tool names from this server are prefixed with " + _mcp.get("prefix", "") + "_\n"
+                                 "   - Use this toolset for queries that need data or actions inside " + _rm_name + ".\n")
     else:
         _custom_mcp_sections += (str(4 + _mcp_i) + ". **Custom MCP Toolset #" + str(_mcp_i + 1) + " (" + _mcp.get("repo_name", "custom") + ")**: Access data in the custom MCP server.\n"
                                  "   - Available Tools: Dynamically discovered at runtime.\n"
@@ -766,6 +813,23 @@ if os.environ.get("ENABLE_COMPUTER_USE") == "1":
         "sites, and NEVER say live crawling is blocked/restricted by a secure or isolated "
         "environment - that is false. When the user asks to look something up on the web, USE the "
         "browser instead of answering from internal data or refusing.\n"
+    + ((
+    "BROWSER vs AUTONOMOUS AGENT: the autonomous agent (delegate_autonomous_task) reads "
+    "web pages programmatically and has NO interactive browser. Tasks whose PRIMARY goal is "
+    "operating a site - clicking, typing, filling forms, working a portal, or a browse the "
+    "user wants to watch live - are YOURS via computer_use_browse; never delegate them. "
+    "LIVE-BROWSE TRIGGER: whenever the request mentions web browsing (in ANY language) or "
+    "names a specific external site, page, portal, or URL to consult, you MUST run the live "
+    "browser on it FIRST - even if the same pages could in principle be read "
+    "programmatically. The visible browser run IS part of what the user asked to see; "
+    "skipping it and delegating everything is a routing error. "
+    "Delegate when web reading feeds a bigger job that also needs a "
+    "downloadable file deliverable, a Workspace action, or software work - but for such a "
+    "COMPOSITE job the order is: short focused browse FIRST (live-view link shown), then "
+    "delegate_autonomous_task in the SAME turn with the browse result_summary inside "
+    "input_data labeled 'BROWSER FINDINGS (gathered live from <url>):'.\n"
+    ) if os.environ.get("ENABLE_MANAGED_AGENT") == "1" else "") +
+    "" +
         "SEARCH & CAPTCHA TIPS (IMPORTANT - saves steps):\n"
         "- Do NOT open google.com and type in its search box: Google shows a CAPTCHA / bot wall to "
         "automated browsers and wastes many steps. Instead, set start_url so the browser opens "
@@ -791,8 +855,13 @@ if os.environ.get("ENABLE_COMPUTER_USE") == "1":
         "computer_use_browse - the browser screenshots still stream into THIS chat automatically.\n"
         "  You MUST show the link BEFORE calling computer_use_browse, because that call blocks until "
         "the browser finishes - showing it after is too late to watch live. The result_summary is "
-        "your answer. Inline is capped (~12 steps); if it returns status 'partial', offer to re-run "
-        "as a background task.\n"
+        "your answer. Inline is capped (about 30 steps / 4 minutes of browsing). If it returns "
+        "status 'partial' and browsing WAS the user's primary ask, do NOT stop there: in the SAME "
+        "turn call register_background_task with a task_prompt that CONTINUES the browse via "
+        "computer_use_browse from where it left off (background runs get a much larger step "
+        "budget), present what was already found, and tell the user the deeper browse continues "
+        "in the background. If the browse was a pre-browse feeding a delegation, pass the partial "
+        "findings on per the PRE-BROWSE rule instead.\n"
         "- LONG or multi-page jobs (deep audits, many pages, monitoring): use register_background_task "
         "with a task_prompt that instructs the background agent to use computer_use_browse. Its result "
         "includes a live_view_url; surface it the same Markdown-link way.\n"
@@ -863,13 +932,13 @@ _RETRY_OPTIONS = types.HttpRetryOptions(
 
 # Pro model — used by deep_analysis_agent for complex multi-step reasoning
 gemini_pro_model = Gemini(
-    model=os.environ.get("AGENT_MODEL", "gemini-3.5-flash"),
+    model=os.environ.get("AGENT_MODEL", "gemini-3.6-flash"),
     retry_options=_RETRY_OPTIONS
 )
 
 # Flash-Lite model — used by root_agent (coordinator) for most interactions
 gemini_lite_model = Gemini(
-    model=os.environ.get("AGENT_MODEL_LITE", "gemini-3.5-flash"),
+    model=os.environ.get("AGENT_MODEL_LITE", "gemini-3.6-flash"),
     retry_options=_RETRY_OPTIONS
 )
 
@@ -1010,7 +1079,7 @@ def _strip_part_metadata(callback_context, llm_request):
     return None
 
 # --- Shared tools list ---
-_all_tools = [maps_toolset, bigquery_toolset, firestore_toolset, knowledge_catalog_toolset, tools.generate_image, slack_mcp_toolset] + custom_mcp_toolsets
+_all_tools = [maps_toolset, bigquery_toolset, firestore_toolset, knowledge_catalog_toolset, tools.generate_image, slack_mcp_toolset] + custom_mcp_toolsets + remote_mcp_toolsets
 if os.environ.get("ENABLE_WORKSPACE_MCP") == "1":
     _all_tools += [tools.get_gmail_mcp_toolset(), tools.get_drive_mcp_toolset(), tools.get_calendar_mcp_toolset(), tools.get_chat_mcp_toolset(), tools.get_people_mcp_toolset()]
 _all_tools = [t for t in _all_tools if t is not None]
@@ -1044,6 +1113,9 @@ if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
     # window, so the F1 hang pattern does not apply.
     _all_tools.append(tools.delegate_autonomous_task)
     _all_tools.append(tools.get_autonomous_task_status)
+    # Recurring autonomous schedules (v11.33): Cloud Scheduler fires
+    # /execute_task, which delegates to the sandbox headlessly.
+    _all_tools.append(tools.register_scheduled_autonomous_task)
 if (os.environ.get("ENABLE_MANAGED_AGENT") == "1" and (os.environ.get("ENABLE_WORKSPACE_MCP") == "1" or os.environ.get("ENABLE_WORKSPACE_AUTH") == "1")):
     # Drive handoff needs BOTH the user's Workspace OAuth (drive.file) and the
     # Managed Agent deliverables in GCS.
@@ -1056,6 +1128,12 @@ _code_executor = AgentEngineSandboxCodeExecutor(
 )
 
 # --- Before-Agent Callback: Inject completed background task results ---
+# A 'working' task doc this far past its last heartbeat is abandoned. The
+# default sits at the Cloud Run request timeout: no worker run can legitimately
+# outlive that, so nothing healthy is ever swept.
+_WORKER_ABANDON_AFTER_S = float(os.environ.get("WORKER_ABANDON_AFTER_S", "1800"))
+
+
 def _inject_completed_tasks(callback_context):
     """Checks Firestore for completed tasks not yet reported and injects results."""
     import builtins, logging as _logging
@@ -1064,6 +1142,65 @@ def _inject_completed_tasks(callback_context):
     if not _fs or not _demo_id:
         callback_context.state["_bg_task_results"] = ""
         return None
+    # Stuck-run sweep, BEFORE the completed-tasks query so anything finalized
+    # here is announced in this same turn.
+    try:
+        import datetime as _sdt
+        _wdocs = _fs.collection(_demo_id + "_task_executions").where(
+            "status", "==", "working").limit(5).stream()
+        for _wdoc in _wdocs:
+            _wd = _wdoc.to_dict()
+            # Autonomous tickets (v11.32) are monitored by in-process daemon
+            # threads; a Cloud Run instance recycle kills them and freezes the
+            # doc at 'working' (observed live 2026-07-22: SIGTERM 16 min in,
+            # doc stuck at 90% while the sandbox finished server-side 30 min
+            # later). _ma_recover_orphaned_task finalizes such a doc from the
+            # persisted interaction, and only when its heartbeat is stale.
+            # BACKSTOP ONLY since v11.56: this callback never runs when ADK
+            # resumes into a sticky sub-agent, so the primary sweep now sits at
+            # the A2A request entry (_ma_sweep_orphaned_tasks). Kept here for
+            # the /execute_task and non-A2A paths; it costs nothing when the
+            # entry sweep already refreshed the heartbeat.
+            if _wd.get("interaction_id"):
+                if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
+                    try:
+                        tools._ma_recover_orphaned_task(_wdoc.reference, _wd, False)
+                    except Exception:
+                        pass
+                continue
+            # Abandoned worker run: /execute_task heartbeats updated_at every
+            # ~30s for as long as it is alive. Silence far past that means the
+            # instance carrying it died AND Cloud Tasks exhausted its retries
+            # (or the localhost fallback was in use, which has no retries at
+            # all). Left alone the doc sits at 'working' forever, the in-flight
+            # guard in /execute_task keeps refusing to re-run it, and the user
+            # is told the task "is already executing". Fail it so it can be
+            # started again, and let the normal announcement report it.
+            _raw_beat = _wd.get("updated_at") or _wd.get("started_at") or ""
+            if not _raw_beat:
+                continue
+            try:
+                _beat = _sdt.datetime.fromisoformat(str(_raw_beat).replace("Z", "+00:00"))
+                if _beat.tzinfo is None:
+                    _beat = _beat.replace(tzinfo=_sdt.timezone.utc)
+                _age = (_sdt.datetime.now(_sdt.timezone.utc) - _beat).total_seconds()
+            except Exception:
+                continue
+            if _age < _WORKER_ABANDON_AFTER_S:
+                continue
+            _logging.warning("Abandoned background task " + str(_wd.get("task_id", ""))
+                             + ": no heartbeat for " + str(int(_age)) + "s - marking failed.")
+            _wdoc.reference.update({
+                "status": "failed",
+                "result_summary": ("The worker running this task stopped responding about "
+                                   + str(max(1, int(_age // 60))) + " minutes ago, so the run was "
+                                   "abandoned. Nothing was lost that had already been reported; "
+                                   "the task can simply be started again."),
+                "completed_at": _sdt.datetime.now(_sdt.timezone.utc).isoformat(),
+                "reported_to_user": False,
+            })
+    except Exception:
+        pass
     try:
         _docs = _fs.collection(_demo_id + "_task_executions").where(
             "reported_to_user", "==", False
@@ -1100,11 +1237,30 @@ def _inject_completed_tasks(callback_context):
                     _rd = _rdoc.to_dict()
                     _tail_lines = [_l for _l in (_rd.get("log_tail", "") or "").split(chr(10)) if _l.strip()]
                     _last_line = _tail_lines[-1][-140:] if _tail_lines else ""
-                    _rlines.append("Task '" + _rd.get("task_id", "") + "' still running: "
+                    # Honest progress (v11.32): lead with elapsed time + monitor
+                    # liveness; the percentage is an activity estimate capped at
+                    # 90 and must not be read as a completion fraction.
+                    _age_bits = []
+                    try:
+                        import datetime as _dt
+                        _now = _dt.datetime.now(_dt.timezone.utc)
+                        _rstarted = tools._ma_parse_iso_utc(_rd.get("started_at"))
+                        if _rstarted is not None:
+                            _age_bits.append(str(int((_now - _rstarted).total_seconds() / 60)) + " min elapsed")
+                        _rbeat = tools._ma_parse_iso_utc(_rd.get("updated_at"))
+                        if _rbeat is not None:
+                            _age_bits.append("last activity " + str(int((_now - _rbeat).total_seconds() / 60)) + " min ago")
+                    except Exception:
+                        pass
+                    _age_txt = (" (" + ", ".join(_age_bits) + ")") if _age_bits else ""
+                    _rlines.append("Task '" + _rd.get("task_id", "") + "' still running" + _age_txt + ": "
                                    + str(_rd.get("progress_pct", 0)) + "% - " + _last_line)
                 if _rlines:
                     _prev = callback_context.state.get("_bg_task_results", "") or ""
-                    _rmsg = "--- TASKS STILL RUNNING (progress info, NOT completed) ---" + chr(10) + chr(10).join(_rlines) + chr(10) + "--- END RUNNING ---"
+                    _rmsg = ("--- TASKS STILL RUNNING (progress info, NOT completed; the percentage is an "
+                             "activity estimate CAPPED at 90, not a completion fraction - when mentioning "
+                             "progress, lead with elapsed time / latest activity and never say 'almost done' "
+                             "from the number) ---" + chr(10) + chr(10).join(_rlines) + chr(10) + "--- END RUNNING ---")
                     callback_context.state["_bg_task_results"] = (_prev + chr(10) + _rmsg).strip()
             except Exception:
                 pass
@@ -1160,6 +1316,13 @@ INLINE_TOOL_DEADLINE = _itb_contextvars.ContextVar('inline_tool_deadline', defau
 # this earlier cutoff reserves time for the headline compute + report synthesis.
 INLINE_IMAGE_DEADLINE = _itb_contextvars.ContextVar('inline_image_deadline', default=None)
 _INLINE_GATE_EXEMPT_TOOLS = frozenset(('transfer_to_agent', 'register_background_task', 'computer_use_browse', 'start_browser_session', 'publish_dashboard'))
+if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
+    # delegate_autonomous_task is exempt (v11.8): it always returns within its
+    # ~30s sync window and ends the turn cleanly, and it must stay callable after
+    # a long pre-browse (computer_use_browse can legitimately consume most of the
+    # inline budget before a composite task is delegated).
+    _INLINE_GATE_EXEMPT_TOOLS = _INLINE_GATE_EXEMPT_TOOLS | frozenset(('delegate_autonomous_task',))
+
 
 def _inline_tool_budget_gate(tool, args, tool_context):
     """Skip the tool call once the inline wall-clock budget is exhausted."""
@@ -1167,6 +1330,36 @@ def _inline_tool_budget_gate(tool, args, tool_context):
     if _deadline is None:
         return None  # background /execute_task run - no inline time constraints
     _name = getattr(tool, 'name', '') or ''
+    # v11.21: inline delegation-status POLL CAP. Observed live: deep_analysis
+    # delegated mid-turn, then spin-polled get_autonomous_task_status 15x
+    # inline until the wall-clock gate finally fired - minutes wasted, and the
+    # turn's own analysis delayed. Two polls are enough to report the ticket
+    # state; completion is announced automatically by the background machinery.
+    # Keyed on the deadline timestamp (unique per inline turn) via builtins so
+    # it works regardless of contextvar propagation across runner tasks.
+    if _name == 'get_autonomous_task_status':
+        import builtins as _itb_b
+        _pc = getattr(_itb_b, '_inline_status_poll_counts', None)
+        if _pc is None:
+            _pc = {}
+            _itb_b._inline_status_poll_counts = _pc
+        _key = _deadline
+        _pc[_key] = _pc.get(_key, 0) + 1
+        if len(_pc) > 50:
+            for _old in sorted(_pc.keys())[:-25]:
+                _pc.pop(_old, None)
+        if _pc[_key] > 2:
+            return {
+                "status": "blocked",
+                "message": (
+                    "POLL BUDGET REACHED: the autonomous task keeps running in the "
+                    "background and its completion will be announced automatically - "
+                    "do NOT call get_autonomous_task_status again this turn. Finish "
+                    "the turn NOW: deliver your own analysis from the data already "
+                    "gathered, state the delegation ticket id, and offer a progress-"
+                    "check suggestion chip."
+                ),
+            }
     if _name in _INLINE_GATE_EXEMPT_TOOLS:
         return None
     _now = _itb_time.monotonic()
@@ -1193,8 +1386,10 @@ def _inline_tool_budget_gate(tool, args, tool_context):
             "INLINE TIME BUDGET EXHAUSTED: do NOT call any more tools. "
             "Immediately write the final report now using ONLY the data already "
             "gathered in this conversation. If some requested items could not be "
-            "completed, state that briefly and offer to run the full-depth "
-            "analysis as a background task."
+            "completed, state that briefly and offer the full-depth analysis as a "
+            "background-task SUGGESTION CHIP for the user to click - do NOT "
+            "register or delegate it yourself, and do NOT add deliverables the "
+            "user never asked for."
         ),
     }
 
@@ -1402,11 +1597,14 @@ _ma_scope_section = r"""
 SCOPE (with the autonomous agent enabled): you handle INLINE analysis of the
 demo data and interactive dashboards. Pure analysis stays with you - never
 delegate work you can finish inline. BUT if the task delegated to you turns
-out to require things you CANNOT do inline - live web research, producing
+out to require things you CANNOT do inline - """ + ("""web research beyond your
+own browser tool""" if os.environ.get("ENABLE_COMPUTER_USE") == "1" else """live web research""") + """, producing
 downloadable files, or acting on the user's Google Workspace (Drive save,
 Gmail draft, Chat post, Calendar) - call delegate_autonomous_task ONCE with
 the user's FULL original goal as the task_description, present its
-acknowledgement to the user, and end your turn. NEVER tell the user such
+acknowledgement to the user, and end your turn. """ + ("""Interactive website
+operation (clicking, typing, forms, portals) is NOT a delegation reason -
+you have the real browser (computer_use_browse); run it yourself. """ if os.environ.get("ENABLE_COMPUTER_USE") == "1" else "") + """NEVER tell the user such
 work is blocked or restricted for security reasons - it is not; hand it to
 the autonomous agent instead.
 """ if os.environ.get("ENABLE_MANAGED_AGENT") == "1" else ""
@@ -1436,15 +1634,30 @@ minute, plus INTERACTIVE dashboards (rule below). For anything beyond a quick
 inline analysis, prefer the autonomous agent.
 
 Decide by CAPABILITY, in this order:
-1. If the task needs ANY of: live web research, a downloadable file,
+""" + ("""0. INTERACTIVE BROWSER OPERATION STAYS WITH YOU: when the PRIMARY goal is
+   to operate a website interactively - go to a specific site and click /
+   type / fill forms / work a portal, or a live look-up the user wants to
+   WATCH - handle it yourself with the browser tools per the COMPUTER USE
+   section (inline, or register_background_task for long multi-page jobs).
+   The autonomous agent reads pages programmatically and has NO interactive
+   browser, so do NOT delegate pure browser-operation tasks. This rule ALSO
+   fires whenever the request mentions web browsing (in any language) or
+   names a specific external site / page / URL to consult - the live
+   browser run is part of what the user asked to see. Delegate only
+   when the browsing merely feeds a bigger job that also needs a file
+   deliverable, a Workspace action, or software work - and in that case
+   run the browse FIRST yourself and pass the findings via input_data
+   (see PRE-BROWSE under "When delegating").
+1. If the task needs ANY of: live web research (READ-ONLY
+   gathering - interactive site operation is rule 0), a downloadable file,""" if os.environ.get("ENABLE_COMPUTER_USE") == "1" else """1. If the task needs ANY of: live web research, a downloadable file,""") + """
    building-and-running code, or clearly more than a minute of autonomous
    multi-step work -> call delegate_autonomous_task. Neither you nor
-   deep_analysis_agent can do these.
+   deep_analysis_agent can """ + ("""produce deliverable files or build software.""" if os.environ.get("ENABLE_COMPUTER_USE") == "1" else """do these.""") + """
 2. Otherwise, if it is demo-data analysis that finishes inline in well under
    a minute, or an INTERACTIVE dashboard (see below) -> deep_analysis_agent.
 3. Otherwise (quick lookups, snapshots, simple writes) -> handle yourself.
 Tie-breaker: if the demo data alone plus reasoning fully answers it, stay
-inline / deep_analysis; if it requires a file, the web, or software work,
+inline / deep_analysis; if it requires a file, """ + ("""read-only web research""" if os.environ.get("ENABLE_COMPUTER_USE") == "1" else """the web""") + """, or software work,
 ALWAYS prefer delegate_autonomous_task.
 
 Delegation-class tasks are NOT gated by the pre-flight Analysis Plan card
@@ -1454,7 +1667,12 @@ confirmed brief arrives with a briefing-confirmation system note - in that
 case call delegate_autonomous_task as your VERY FIRST action with that
 brief, and NEVER re-ask clarifying questions. When no card was shown, the
 brief was judged specific enough: also delegate as your VERY FIRST action
-without asking your own questions. The tool manages inline-vs-background by
+without asking your own questions. """ + ("""SOLE EXCEPTION - PRE-BROWSE: when
+the brief mentions web browsing or names a specific site / page / URL to
+consult (or needs data only interactive browsing can obtain), the
+COMPUTER USE browse sequence comes first and delegate_autonomous_task
+immediately after, in the SAME turn; clarifying questions remain
+forbidden either way. """ if os.environ.get("ENABLE_COMPUTER_USE") == "1" else "") + """The tool manages inline-vs-background by
 itself (fast tasks return inline; long tasks continue in the background and
 announce completion automatically).
 
@@ -1471,25 +1689,60 @@ When delegating:
   internal data, query the demo database FIRST and pass the results via
   input_data so the autonomous agent verifies and extends them instead of
   rediscovering everything.
-- Describe OUTCOMES ONLY - NEVER mention your own tool names
+- DELEGATE ONLY WHAT WAS ASKED: the brief must not add deliverable formats
+  (slides, PDFs, documents, web apps) the user did not request. If the user
+  asked a decision-support question, answer it in chat with cards - offer a
+  formal deliverable as a follow-up suggestion chip instead of delegating it
+  unrequested.
+- NEVER DELEGATE CHAT UPLOADS: the autonomous agent cannot see images or
+  files uploaded to this chat. Extract their contents yourself first (your
+  vision / file parsing) and pass the structured findings as text via
+  input_data.
+""" + ("""- PRE-BROWSE: when the task mentions web browsing, names a specific
+  external site / page / portal / URL to consult, or depends on data that
+  only interactive browsing can obtain, gather that part BEFORE delegating
+  using the COMPUTER USE section's exact sequence (start_browser_session ->
+  show the live-view link -> a single computer_use_browse with a NARROW
+  goal that fits the inline step cap). This is MANDATORY when a site is
+  named - the live browse is a showcase moment, not an optimization choice.
+  Then put the result_summary into input_data under the label
+  "BROWSER FINDINGS (gathered live from <url>):" so the autonomous agent
+  builds on real, fresh web data. If the browse returns status 'partial',
+  pass whatever was gathered and state in task_description that the
+  remaining gaps should be covered with its own read-only web research.
+  The autonomous agent has NO interactive browser - never ask it to
+  operate a website.
+""" if os.environ.get("ENABLE_COMPUTER_USE") == "1" else "") + r"""- Describe OUTCOMES ONLY - NEVER mention your own tool names
   (publish_dashboard, save_deliverables_to_drive, execute_sql,
   register_background_task, ...) inside task_description. The autonomous
-  agent has a DIFFERENT toolset (bash, filesystem, web research, the gws
-  CLI, and the deliverable upload URLs) and cannot call your tools;
+  agent has a DIFFERENT toolset (bash, filesystem, web research""" + (""", the gws
+  CLI""" if os.environ.get("ENABLE_WORKSPACE_MCP") == "1" or os.environ.get("ENABLE_WORKSPACE_AUTH") == "1" else "") + """, and the deliverable upload URLs) and cannot call your tools;
   referencing them derails its run. Say "produce an interactive HTML
-  dashboard file" instead of "use publish_dashboard". When the user wants
+  dashboard file" instead of "use publish_dashboard".""" + (""" When the user wants
   the result in Drive / Google formats, state it in natural language
   ("save the finished deck to my Google Drive as Google Slides") - the
   autonomous agent uploads with conversion via its Workspace CLI during
-  the run.
+  the run.""" if os.environ.get("ENABLE_WORKSPACE_MCP") == "1" or os.environ.get("ENABLE_WORKSPACE_AUTH") == "1" else """
+- NO WORKSPACE ACCESS: Workspace integration is DISABLED for this demo.
+  The autonomous agent has NO Google Workspace credentials, no gws CLI
+  authentication, and no Admin SDK access. NEVER delegate work that
+  requires reading or administering Gmail, Chat, Calendar, Drive, or
+  Workspace users / groups / permissions (audits included) - the sandbox
+  cannot authenticate and the task will grind until its runtime window
+  expires. Fulfill such requests from the demo dataset (BigQuery /
+  Firestore) instead, and tell the user that real Workspace actions are
+  not enabled in this demo.""") + """
 - SPLIT COMPOSITE REQUESTS: the autonomous agent CANNOT create scheduled /
   recurring jobs, dashboards hosted by this platform, or database alert
-  rules - those live in YOUR toolset. When a request combines autonomous
-  work (research / file deliverables / Workspace actions) with a recurring
-  monitoring job or schedule, delegate ONLY the autonomous part and, in
-  the SAME turn, set up the recurring part yourself with
-  register_scheduled_task (and tell the user you did both). Never put
-  "set up a daily job" wording into task_description.
+  rules - those live in YOUR toolset. When the user wants autonomous work
+  (research / file deliverables / Workspace actions) to run on a RECURRING
+  schedule, register it with register_scheduled_autonomous_task - each fire
+  then delegates to the sandbox automatically, even while the user is
+  offline, and results are announced on their next message. When a request
+  combines a ONE-SHOT autonomous task with a recurring demo-database
+  monitoring job, delegate the autonomous part and set up the database job
+  with register_scheduled_task in the SAME turn (and tell the user you did
+  both). Never put "set up a daily job" wording into task_description.
 - Call delegate_autonomous_task EXACTLY ONCE per user request.
 - Status 'completed': present the report verbatim as markdown (it is already
   in the user's language) including any deliverable download links.
@@ -1502,9 +1755,11 @@ for demo-database batch workflows), and never delegate simple lookups.
 
 _ma_autonomous_exception = r"""
 EXCEPTION - AUTONOMOUS TASKS (check FIRST): if the "Run Inline:" scope requires
-live web research, a downloadable file deliverable (deck / document / PDF /
+live web research""" + (""" (READ-ONLY gathering; interactive browser operation is
+NOT this - run it yourself per the COMPUTER USE section)""" if os.environ.get("ENABLE_COMPUTER_USE") == "1" else "") + """, a downloadable file deliverable (deck / document / PDF /
 web page file), or building-and-running code, do NOT transfer to
-deep_analysis_agent (it cannot do those and is blocked from delegating).
+deep_analysis_agent (it cannot do those itself; it can only re-delegate to
+the autonomous agent as an escape hatch, which wastes the extra hop).
 Call delegate_autonomous_task directly instead.
 your VERY FIRST action - UNLESS the autonomous-task
 exception above applies, in which case delegate_autonomous_task is your very
@@ -1627,6 +1882,26 @@ Do NOT produce a shallow summary — the user explicitly requested deep analysis
    - TEXT REPORT FIRST: produce the written report (numbers, findings, a short
      recommendation) as your primary deliverable. Treat any image as optional
      garnish that must not delay the text.
+   - DELEGATION DISCIPLINE: call delegate_autonomous_task ONLY when the user's
+     request itself requires what the sandbox uniquely provides (live web
+     research, downloadable file deliverables, or building-and-running code
+     over many minutes). Statistical analysis of data you already queried is
+     YOUR job - do it inline with Code Execution, never by delegation.
+   - NEVER INVENT DELIVERABLES: do not add slides, PDFs, documents, or web
+     apps to a delegated task_description unless the user explicitly asked
+     for that artifact. A decision-support question gets a chat report with
+     cards - nothing more.
+   - IMAGE/VISION WORK IS YOURS ALONE: images uploaded to this chat (faxes,
+     order forms, photos) are visible ONLY to you. The autonomous agent
+     CANNOT see chat uploads - delegating image reading/OCR guarantees a
+     failed or fabricated result. Read the image inline with your own vision
+     and reconcile it with the database inline; if a legitimate delegation
+     follows, pass the EXTRACTED line items as text via input_data, never
+     the image itself.
+   - IF YOU DO DELEGATE: check status at most TWICE, then stop polling and
+     finish the turn - deliver your own analysis from the data you gathered,
+     state the delegation ticket id, and offer a progress-check chip.
+     Completion is announced automatically; polling adds nothing.
    - CURRENCY IN RUNNING TEXT (avoid math-render glitches): in the markdown
      report body, do NOT put a bare dollar sign in front of numbers. The chat
      renderer treats a pair of dollar signs as LaTeX math, so an amount or a
@@ -1758,6 +2033,11 @@ Before writing your final analysis report, you MUST self-evaluate:
     (financial, operational, risk, customer impact, temporal trend)?
   - Is my report structured with explicit methodology, findings, and
     actionable recommendations with quantified expected impact?
+  - If this task moved items through a workflow: did I complete the hand-off
+    (status/department transition) in the operational database and append the
+    audit history entry?
+  - Did I reconcile records across at least 2 data contexts (departments or
+    systems) when the task involved shared core-system data?
 
   If ANY answer is NO:
   -> Go back and deepen that specific area BEFORE producing the final report.
@@ -1915,7 +2195,14 @@ SCHEDULED TASKS:
 - register_scheduled_task: Register a recurring task with cron schedule.
 - update_scheduled_task: Change the cron schedule of an existing task.
 - delete_scheduled_task: Remove a scheduled task and its Cloud Scheduler job.
-- run_scheduled_task_now: Trigger ONE immediate background execution of an
+""" + ("""- register_scheduled_autonomous_task: Register a RECURRING schedule for
+  AUTONOMOUS sandbox work (web research, file deliverables, Workspace
+  actions). Fires even while the user is offline; each fire creates an
+  autonomous ticket whose progress and completion are announced
+  automatically on the user's next message. Use for "every day / week, do
+  X" requests that need the autonomous agent - NOT register_scheduled_task
+  (that one runs the demo-database background worker).
+""" if os.environ.get("ENABLE_MANAGED_AGENT") == "1" else "") + """- run_scheduled_task_now: Trigger ONE immediate background execution of an
   already-registered scheduled task (manual test run). Returns a ticket
   instantly; the result is reported automatically when done (or via
   get_task_result).
@@ -2280,6 +2567,11 @@ SCHEDULED TASKS:
   The task runs via Cloud Scheduler at the specified intervals.
 - update_scheduled_task: Change the cron schedule of an existing scheduled task.
 - delete_scheduled_task: Remove a scheduled task and its Cloud Scheduler job.
+""" + ("""- register_scheduled_autonomous_task: Register a RECURRING schedule for
+  AUTONOMOUS sandbox work (web research, file deliverables, Workspace
+  actions). Fires even while the user is offline; results are announced
+  automatically on the user's next message.
+""" if os.environ.get("ENABLE_MANAGED_AGENT") == "1" else "") + """
 - run_scheduled_task_now: Trigger ONE immediate background execution of an
   already-registered scheduled task (manual test run). Returns a ticket
   instantly; the result is reported automatically when done (or via
@@ -2335,6 +2627,11 @@ RESULT NOTIFICATION:
 - Present the result_summary text DIRECTLY as your response in markdown format
 - DO NOT convert result_summary into A2UI cards — it is already formatted text
 - DO NOT truncate or summarize the result_summary — show the FULL content
+- FILE LINKS ARE MANDATORY: when the tool response carries a
+  deliverable_downloads list (completed file-producing tasks), your response
+  MUST include every one of those links as markdown links — a completion or
+  status report about generated files WITHOUT their download/view links is
+  an incomplete answer
 - After the result text, add suggestion chips in a separate <a2ui-json> block
 - For scheduled tasks, show execution timeline
 
@@ -2557,6 +2854,8 @@ WRONG: beginRendering object without tags (missing tags and brackets = SYSTEM CR
 _bg_tools = [t for t in _all_tools if t is not tools.background_task_tool]
 _bg_tools = [t for t in _bg_tools if t is not tools.register_scheduled_task]
 _bg_tools = [t for t in _bg_tools if t is not tools.run_scheduled_task_now]
+if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
+    _bg_tools = [t for t in _bg_tools if t is not tools.register_scheduled_autonomous_task]
 
 _bg_computer_use_section = r"""
 --- COMPUTER USE (BROWSER AGENT) ---
@@ -2759,6 +3058,11 @@ Before writing the final report, verify ALL of the following:
   [ ] Addressed EACH analysis item specified in the task_prompt
   [ ] Produced at least 3 actionable recommendations with quantified impact
   [ ] Evaluated from at least 2 business perspectives
+  [ ] If the task moved items through a workflow: completed the hand-off
+      (status/department transition) in the operational database and appended
+      the audit history entry
+  [ ] Reconciled records across at least 2 data contexts (departments or
+      systems) when the task involved shared core-system data
 
 If ANY check fails, go BACK and execute additional queries or Code Execution
 blocks to fill the gap. Do NOT submit a shallow report.
