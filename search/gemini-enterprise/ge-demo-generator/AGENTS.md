@@ -1,4 +1,4 @@
-# AGENTS.md — AI Agent Development Guide for GE Demo Generator
+# AGENTS.md — AI Agent Development Guide for Gemini Enterprise Demo Generator
 
 > **Purpose**: Project-specific knowledge for AI coding agents (Antigravity, Cursor, Copilot, etc.)
 > and humans working on this sample.
@@ -25,7 +25,15 @@ agent_template/ (real, testable files — fetched at setup run time)
   ├─ adk_agent/app/tools.py            toolsets (env-gated feature blocks)
   ├─ adk_agent/app/fast_api_app.py     A2A/FastAPI runtime
   ├─ adk_agent/app/part_converters.py  A2UI part conversion
-  ├─ adk_agent/app/examples/0.8/*.json A2UI few-shot examples
+  ├─ adk_agent/app/examples/0.9/*.json A2UI v0.9 few-shot examples
+  │                                    (the composite catalog itself is fetched
+  │                                     into adk_agent/app/catalogs/ at setup time;
+  │                                     a2ui globs this directory, so the setup
+  │                                     script deletes the seven Workspace surfaces
+  │                                     when Workspace MCP is off — about 5.5k
+  │                                     prefill tokens of surfaces with no tool
+  │                                     behind them. A2UI_KEEP_ALL_EXAMPLES=1
+  │                                     keeps them.)
   ├─ managed_agent/                    Managed Agent provisioning helpers
   │                                    (create_managed_agent.py, warmup_managed_agent.py)
   ├─ demo_skills/                      Deliverable craft skills mounted into the
@@ -75,6 +83,11 @@ Dockerfile assembly, deployment). Inside those JS template literals:
   newline disappears from the output). Use it only intentionally.
 - Quoted heredocs (`cat <<'X'`) pass content through verbatim; unquoted
   heredocs (`cat <<X`) expand `$VAR` at run time.
+- Because a quoted heredoc is verbatim, content bound for one must **not** be
+  pre-escaped. The shell does not strip the backslashes back off; they land in
+  the written file. The system instruction was escaped this way for a quoted
+  heredoc until v11.95-public, so every `$`, backtick and backslash reached the
+  model with a stray backslash in front of it. Escape for the heredoc you have.
 
 ### 2.3 ADK instruction template engine hazard (applies to agent.py)
 
@@ -109,9 +122,39 @@ or the research language while research is in play — so `getOptimizeLanguage()
 passes it in `capabilityOpts.language` and the prompt states it once,
 positively: `**OUTPUT LANGUAGE (MANDATORY)**: Write the entire output in
 <Language>.` English then held in 8 of 8 runs.
-`resolveOutputLanguage_()` accepts both vocabularies the UI has to hand
-(Template Hub codes like `en`, research names like `Deutsch`) and returns `''`
-for anything else, which leaves the caller on a detection-only fallback.
+`resolveOutputLanguage_()` accepts every vocabulary the UI has to hand
+(Template Hub codes like `en`, research names like `Deutsch`, and since v11.58
+`custom:<name>` for a language the user typed into a free-text box) and returns
+`''` for anything else, which leaves the caller on a detection-only fallback.
+
+**Free-text languages (v11.58, both selectors in v11.59).** Nothing but the
+model does the translating, so a selector's list is a short list, not a limit —
+`Other language...` reveals an input and the typed name travels as
+`custom:<name>`. The list is only there to save typing, which is why the entries
+added in v11.58 (Malay, Indonesian, Thai, Vietnamese, Filipino, Hindi, Arabic,
+Turkish, Polish) are a convenience rather than a capability change. The Template
+Hub got this first; v11.59 gave the customer-domain research selector the same
+list and the same free-text box, so `SUPPORTED_RESEARCH_LANGS_` now bounds only
+what **auto-detect** may answer with. Three rules hold the free-text path
+together:
+
+- **Sanitize before the prompt, not after.** `sanitizeCustomLanguage_()` strips
+  quoting/markup characters and rejects anything over 40 characters or 4 words:
+  a language name is a couple of words, so a sentence arriving in that box is
+  far likelier to be an injection attempt than a language. A rejected value
+  returns `{success: false, error: 'Unrecognized language'}` so the UI can say
+  so, rather than silently rendering English.
+- **Look languages up with `hasOwnProperty`.** `TEMPLATE_LANGS_['constructor']`
+  is a function, and a truthiness check would have stringified it straight into
+  the prompt. The frontend's per-language cache has the same hazard and the same
+  fix (`cachedTemplateHub()`).
+- **A language that cannot round-trip is a language that gets lost.**
+  `researchCompanyByDomain` returns `detectedLanguage` for the Magic Wand and
+  `regenerateGoalForWorkflows` to reuse, so an unlisted answer (a typed
+  override, or auto-detect replying `Norsk`) comes back as `custom:Norsk`.
+  Returned bare, it resolves to `''` two calls later and the scenario quietly
+  reverts to text detection — the failure shows up as an English optimize on a
+  Thai research result, nowhere near the code that caused it.
 
 Two things worth keeping in mind if you touch this:
 
@@ -140,6 +183,10 @@ English without a trace -- the only way to tell it apart from a successful no-op
 was that the emit landed 1 ms after the call.
 
 ### 2.5 A2UI card delivery and press context
+
+> These were found on A2UI v0.8 and are written in its vocabulary
+> (`beginRendering`/`surfaceUpdate`/`sendText`). The lessons still hold; section
+> 13 gives the v0.9 spelling of each protocol name.
 
 Two failure modes found together on one live turn (a scanned-fax-to-quote
 workflow): the card the model tried to draw never appeared, and the answers the
@@ -256,6 +303,70 @@ which is exactly why this looked handled -- **a filter on one reader is not a
 filter on the class.** When an injection targets the user's own message, audit
 every function that reads `new_message.parts`.
 
+### 2.6 A press scrolls to the element of the PREVIOUS press (v11.90)
+
+**On a press, Gemini Enterprise scrolls to the element of the user's previous
+press.** That target is client state, and nothing the agent emits during the
+turn can move it.
+
+The test that settled this changed nothing in the agent: press a button in the
+newest turn, then scroll up and press one in a much older turn. The view jumps
+DOWN, onto the surface pressed a moment earlier. Direction is the tell -- no
+rule phrased as "the nearest surface ABOVE the pressed one" can scroll
+downward, so every reading this file carried through v11.83-v11.89 is
+withdrawn, and "it jumps one card back" was always this: at the bottom of a
+conversation, the previous press was the previous turn's chip bar.
+
+**What v11.90 does.** A surface that no longer exists cannot be scrolled to, so
+a press-initiated turn retires the surface its button lived in.
+`_pressed_surface_delete_parts()` in `fast_api_app.py` reads
+`userAction.surfaceId` off the press payload and appends a `deleteSurface`
+message as the last part of the artifact -- exactly the anchor the NEXT press
+would aim at. Live-verified: the backwards jump stops.
+
+- The choice stays visible. A press also carries `query.text` (the action's
+  prompt), which the client renders as the user's own message.
+- A surface this turn is also rendering is never deleted -- gate cards reuse
+  their ids -- and `A2UI_KEEP_PRESSED_SURFACE=1` restores the old behaviour.
+- `test_press_retire.py` covers the helper off-line: chip, gate and welcome
+  presses, the re-render guard, typed messages, malformed payloads, kill switch.
+
+**The layout stays, on its own merits** -- its scroll rationale is dead, but
+next actions below the answer card is what the demos want and it reads better:
+
+- **Suggestion chips are their own trailing surface** (surfaceId
+  `suggestions`), never a `MaterialRow` inside the card, and
+  `_card_wrap_chip_surface` gives that surface a `MaterialCard` root, styled
+  `border: none` / `background: transparent` so it looks unchanged.
+- **Model-authored result cards carry no footer action row.** The prompt used to
+  demand one, which contradicted the chips rule in the same prompt. The few-shot
+  examples keep their follow-up row in the trailing surface.
+- **Server-built gate cards use `_action_surface_parts()`.** The analysis-plan
+  and autonomous-briefing cards keep only their heading and prose; their input
+  fields and buttons are emitted below as one transparent card-rooted surface.
+  The fields have to move with the buttons, because a `{"path": ...}` binding is
+  resolved against the surface the button lives in, not the turn.
+
+The one case where buttons stay INSIDE a card is a compose, confirmation or
+what-if card whose button reads that card's own bound fields -- it cannot be
+split, for the binding reason above. The welcome card is the other exception:
+its buttons are its own content.
+
+Dead ends, do not retry: an anchor surface emitted before the card
+(v11.83/84/86), and an invisible trailing "landing" (v11.88) -- a transparent
+card holding a zero-width space is emitted but never drawn, and Gemini
+Enterprise has never been seen to render a component tree with no text in it.
+
+### 2.7 gcloud CLI release track negotiation and fail-soft
+
+**NEVER hardcode non-GA (alpha/beta) gcloud flags or assume uniform host SDK versions.**
+Host environments (developer workstation vs standard Cloud Shell vs CI) run different Google Cloud SDK versions. What works in `beta` on bleeding-edge SDKs (e.g. SDK 583.0+) may only be in `alpha` or missing entirely on older or minimal installations (e.g. SDK <= 582.0).
+
+- Always check the Google Cloud SDK `RELEASE_NOTES` for the minimum version introducing the flag.
+- Implement dynamic capability probing with graceful degradation / fail-soft fallback (probe `beta` -> probe `alpha` -> fall back to standard invocation omitting non-essential flags).
+- Never fail or abort a multi-step, 15-minute resource provisioning workflow on optional governance or cataloging metadata.
+- In pull requests introducing new CLI flags, include probe verification outputs (`gcloud <track> <command> --help`) across target SDK versions.
+
 ## 3. Managed Autonomous Agent (`enableManagedAgent`)
 
 Optional feature (default ON in the UI) that provisions a Pre-GA **Managed
@@ -269,12 +380,12 @@ can delegate long-running autonomous work to over the **Interactions API**
   `create_managed_agent.py start`) → `.env` + Cloud Run env
   (`ENABLE_MANAGED_AGENT`, `MANAGED_AGENT_ID`, `MANAGED_AGENT_SKILLS_SOURCE`)
   → env-gated blocks in `tools.py` / `agent.py` / `fast_api_app.py` → PHASE B
-  (after Cloud Run deploy + GE registration: `create_managed_agent.py wait`
+  (after Cloud Run deploy + Gemini Enterprise registration: `create_managed_agent.py wait`
   polls readiness, `warmup_managed_agent.py` stores the environment id in
   Firestore `<demo>_managed_agent_state/current`). The A/B split hides the
   ~8-10 min agent creation behind the rest of the setup.
-- **`enableWorkspaceAuth` (auth-only mode)**: sets up the GE OAuth
-  authorization WITHOUT the Developer-Preview Workspace MCP servers (no
+- **`enableWorkspaceAuth` (auth-only mode)**: sets up the Gemini
+  Enterprise OAuth authorization WITHOUT the Developer-Preview Workspace MCP servers (no
   allowlist needed). Derived gates: `workspaceAuthEnabled = enableWorkspaceMcp
   || enableWorkspaceAuth` (auth infra) and `driveHandoffEnabled =
   enableManagedAgent && workspaceAuthEnabled` (Drive save tool, gws skills,
@@ -390,21 +501,72 @@ merge; a stale `TEMPLATE_REPO` keeps every generated script pointed at the fork.
   Gemini Enterprise app itself lives. Binding an agent to
   `locations/<app-location>/...` points a `us`/`eu` app at a resource that does
   not exist, which reproduces the endless re-authorization prompt.
+- **A broken authorization costs the agent, not just its Workspace tools**:
+  Discovery Engine resolves `authorizationConfig.agentAuthorization` when the
+  agent is created and rejects the whole registration with 404 NOT_FOUND when
+  it names nothing, so the deploy ends with no agent and no direct chat link.
+  Read the authorization back with a GET before naming it, and if a registration
+  that names one produces no agent, retry once without it — a demo whose
+  Workspace tools run as the service account beats a demo with no agent.
+  `test_register_fallback.py` covers both guards off-line.
 - **A failed OAuth token exchange is invisible**: Gemini Enterprise performs
   the code-to-token exchange server-side after consent and surfaces nothing
   when it fails — no UI error, no Cloud Run log, no agent-side signal. Probe
   `https://oauth2.googleapis.com/token` with a throwaway code to tell the
   cases apart: `invalid_grant` means the credentials are fine, `invalid_client`
   means the stored secret is stale.
+- **Do not collapse the Cloud Run deploy back into a bare command, and do not
+  move the org-policy diagnostic out of the failure path**. Both deploys — the
+  agent's in `skills/…/setup_and_deploy.sh` and the Web UI's in `app/Code.gs` —
+  can be refused by `constraints/run.allowedVPCEgress` and
+  `constraints/run.allowedBinaryAuthorizationPolicies`. Those are list policies,
+  and `CreateService` with the matching annotation **unset** counts as a
+  violation, so a project that enforces them rejects a service for an annotation
+  it never mentioned. The raw error names a policy and explains nothing, and the
+  operator concludes the generator is broken. The shape that keeps it legible is
+  load-bearing:
+  - The agent deploy lives in `deploy_agent_service` because it is **retried**
+    with different flags. Inlining the command again removes the retry point.
+  - `$GE_RUN_EXTRA_FLAGS` stays **unquoted and last** on the command; it is empty
+    on every unconstrained project, and quoting it passes one empty argument that
+    `gcloud run deploy` rejects outright.
+  - `ge_orgpolicy_diagnostic` is defined **above Stage 1** because the Data Viewer
+    job, which runs in a parallel subshell, calls it too. Moving it down to the
+    agent deploy takes the viewer's explanation away.
+  - The `[ -f scripts/internal/orgpolicy_heal.sh ]` hook is optional by design and
+    is a no-op here; keep the guard rather than removing the branch, so the file
+    stays identical to the copy that does ship a repair helper.
+  - `--vpc-egress` is rejected on its own: it must arrive with `--network`/
+    `--subnet` or a connector, so the three move together or not at all. With
+    `--vpc-egress=all-traffic` the subnet also needs Private Google Access, or the
+    container cannot reach `googleapis.com` and the deploy *succeeds* while the
+    agent breaks at run time.
 
 ## 7. Verification
 
 - `python3 validate_examples.py` — template JSON + Python compile checks.
 - `python3 check_deps.py` — dependency cap audit (see section 8).
+- `python3 test_press_retire.py` — the press-retire helper deletes a surface the
+  user can see, so its guards are covered off-line (see section 2.6).
+- `python3 test_surface_registry_persist.py` — simulates an instance recycle
+  and checks the surfaceId anchors survive it (see section 10.3).
+- `python3 test_register_fallback.py` — slices the authorization read-back gate
+  and `register_ge_agent_with_fallback` out of `app/Code.gs` and runs them under
+  `bash -e` against a stubbed `curl` and a stubbed `register_agent.py`. The only
+  way to exercise a path whose real trigger is a broken Discovery Engine
+  authorization (see section 6).
+- `python3 test_external_files_wiring.py` — the skill's sample documents have
+  exactly one route into a Drive and one banner that reports it; the gate slices
+  the upload job out of `skills/…/setup_and_deploy.sh` and runs it under a
+  stubbed `gcloud` in both data-exploration modes (see section 14.4).
 - `python3 canary.py --out /tmp/canary --run-venv` — resolve today's
   requirements and actually run the imports (see section 8.4);
   `docker build /tmp/canary` for the full image.
 - `bash -n` any generated setup script before running it.
+- `python3 probe_wire.py --service <cloud-run-service>` — talk to a deployed
+  agent the way Gemini Enterprise does and print the wire (extension echo,
+  part kinds, `metadata.mimeType`, A2UI message keys). Reach for it the moment
+  the logs are clean but the client renders nothing (see section 13.6).
 - After deploy: Cloud Run startup logs, `✅ N/N MCP sidecars ready`,
   `/.well-known/agent.json` responds, model name shows in the thinking
   accordion.
@@ -442,22 +604,49 @@ Two things to know before editing a requirement:
   cap contains `a2a-sdk` without holding ADK back. Only a build that passes
   justifies a bound.
 
-`agent_template/pyproject.toml` repeats four of these requirements verbatim and
+- **A transitive dependency can need a direct entry of its own.**
+  `google-api-core` is pulled in by every Google Cloud client here and nothing
+  declared it, so 2.35.0 (2026-08-24) reached the image unopposed: it added
+  `urllib.parse.quote(val, safe="/")` to
+  `path_template._expand_variable_match`, which percent-encodes the parentheses
+  in Firestore's default database id, and every call in a freshly built demo
+  returned `InvalidArgument: 400 Invalid database id %28default%29` —
+  session persistence, the idempotency claim, task storage and the autonomous
+  worker at once. Conversely, `google-cloud-firestore>=2.30.0` calls
+  `google.api_core.check_python_version()` at import time, a symbol added in
+  `google-api-core` 2.28.0, so the floor must be `>=2.28.0,<2.35.0` and every
+  host `uv run` invocation must pass `--isolated` (`UV_ISOLATED=1`,
+  `PYTHONNOUSERSITE=1`, `unset PYTHONPATH`) with `UV_EXCLUDE_NEWER` set so
+  pre-installed host packages cannot leak into ephemeral setup environments.
+  Bisect before choosing where the cap goes: `google-cloud-firestore` 2.28.1
+  and 2.29.0 both fail on api-core 2.35.0 and both pass on 2.34.0, so capping
+  the Firestore line would have pinned the wrong package and still broken.
+
+`agent_template/pyproject.toml` repeats five of these requirements verbatim and
 is copied into the build context, so it must carry the same caps.
-`check_deps.py` fails if it drifts.
+`check_deps.py` fails if it drifts. The same goes for
+`agent_template/viewer_app/requirements.txt`, which is a static file the script
+copies as-is: the viewer reads the same Firestore collections and needs the
+same cap.
 
 A cap in `requirements.txt` only binds the install *we* issue. When a demo
 imports a custom MCP server, the Dockerfile clones that repo and runs its own
-`uv pip install` into the same site-packages — with bounds we did not write. So
-the script also emits a `constraints.txt` (upper bounds only, derived from the
-same `PINNED_DEPS`) and passes `-c /app/constraints.txt` to both branches of
-that install. Upper bounds only is deliberate: a floor in a constraints file
-can force an *upgrade* inside a resolution we are not steering, including into
-a pre-release; a cap can only ever prevent one. Constraint files may not carry
-extras or direct references, so `[a2a]` / `[agent_engines]` are stripped and
-the a2ui git pin is excluded. Duplicate names are a hard error for pip, which
-is why dropping the floors usefully collapses the two `google-genai` entries
-into one line.
+`uv pip install` — with bounds we did not write. v11.40 answered that by
+emitting a `constraints.txt` (upper bounds only, derived from the same
+`PINNED_DEPS`) and passing `-c /app/constraints.txt` to both branches of that
+install, so the caps applied image-wide.
+
+It worked, and it was the wrong shape: it made the **agent's** requirement
+decide what a **sidecar** may depend on. A server that legitimately needs
+`mcp>=2` became uninstallable because `google-adk` pins `mcp<2`, and that cap
+cannot move — adk imports `mcp.shared.session`, which 2.x deleted.
+
+v12.3 removes the file and the sharing that created it. Each cloned server now
+installs into its own virtualenv rather than the site-packages the agent
+imports from, so a third-party install cannot reach the agent's environment at
+all — a boundary rather than a bound, and the sidecar may hold mcp 2.x while
+the agent holds 1.24. Section 8.5 has the mechanics. Reinstating a shared
+install would need `constraints.txt` back with it.
 
 ### 8.2 The build fails on a broken import, not the container
 
@@ -507,9 +696,9 @@ by running the imports. Until this script existed, the first execution of any
 new resolution was a customer-facing demo build.
 
 `canary.py` reconstructs the build context out of the repo — the requirements
-for a variant, `constraints.txt`, the `__DEP_SMOKE_EOF__` heredoc verbatim, and
-a module holding every import statement in `agent_template/adk_agent/` — into a
-directory that can be run in a venv or built with Docker:
+for a variant, the `__DEP_SMOKE_EOF__` heredoc verbatim, and a module holding
+every import statement in `agent_template/adk_agent/` — into a directory that
+can be run in a venv or built with Docker:
 
 ```bash
 python3 canary.py --out /tmp/canary --run-venv     # fast path, no Docker
@@ -553,21 +742,69 @@ clones the repo and installs it. Each branch of that install used to end in
    `pyproject.toml` or `setup.py`.
 
 Adding `-c /app/constraints.txt` (section 8.1) made (2) *more* likely, not
-less: a cloned server demanding `mcp>=2` now fails resolution, and that
-failure — the one the constraints file exists to produce — was the one being
+less: a cloned server demanding `mcp>=2` then failed resolution, and that
+failure — the one the constraints file existed to produce — was the one being
 swallowed. A guard whose alarm is wired to `/dev/null` is worse than no guard.
+(That constraints file is gone as of v12.3; the swallowing is what this section
+is about, and it would be just as invisible without it.)
 
-The install is now built from three pieces, chosen by position:
+The install is built from these pieces, chosen by position:
 
 | Piece | Where | On failure |
 |-------|-------|------------|
-| `pipStrict` | primary, Python repos | fails → hands over to the Node fallback; no Python manifest at all also counts as failure, so the fallback is reachable |
+| `mkVenv` | first, every repo | fails → fails the build. `uv venv --system-site-packages`, section 8.1 |
+| `pipStrict` | primary, Python repos | fails → hands over to the next position; no Python manifest at all also counts as failure, so the fallback is reachable |
+| `pipFloor` | middle, Python repos | fails → hands over to the Node fallback |
 | `npmCmd` | primary on Node repos, last resort on Python repos | fails → fails the build |
 | `pipBonus` | trailing extra on Node repos, for hybrid servers | prints `WARNING:`, build continues |
 
 `npm run build` is skipped when `npm pkg get scripts.build` returns `{}`, and
 fatal when the repo declares one and it fails — a half-built TypeScript server
 is precisely the image that starts and then cannot answer a tool call.
+
+#### The per-sidecar virtualenv (v12.3)
+
+`mkVenv` creates `/app/custom_mcp_<n>/.venv` and every piece after it installs
+through that interpreter, so a cloned repo's resolution cannot reach the
+agent's `site-packages`. Two details make the boundary safe to cross in the one
+direction that matters. The venv is created `--system-site-packages`, because
+cloned repos are often sloppy about declaring what they import (`mcp`
+especially) and those servers work today only because the agent's copy is
+visible; the venv's own `site-packages` still comes first, so anything the
+server *does* declare shadows ours for that sidecar. And `start_mcp.sh` puts
+`.venv/bin` first on each sidecar's `PATH` inside a subshell — `PATH`, not an
+absolute interpreter, because `entrypoint` is an arbitrary shell command
+(`python -m x`, a console script, `uv run ...`); a subshell so sidecar *n+1*
+does not inherit *n*'s. `VIRTUAL_ENV` is set alongside it so a `uv run`
+entrypoint reuses the environment the build populated.
+
+`pipFloor` is for a server that declares a Python floor above the image's
+interpreter — `yahoo-finance-mcp` says `>=3.14.6` while the image is
+`python:3.11.x`. uv refuses the resolution outright and the build stops, even
+when the server is pure Python. That one sidecar's virtualenv is rebuilt on a
+uv-managed CPython of the declared minor and installed normally; the agent
+keeps the image's interpreter. The floor is read out of `pyproject.toml`
+(PEP 621 `requires-python`, or poetry's `python` entry) and acted on **only
+when it is above this interpreter**, compared on the full version rather than
+the minor, so a satisfiable floor does not rebuild the venv for nothing while a
+same-minor patch floor (3.11.13 on a 3.11.12 image) still does.
+
+Two things this position gets wrong if you write it from first principles, both
+found by building it:
+
+- **`uv venv` refuses to overwrite.** "A virtual environment already exists" —
+  and `mkVenv` has always just made one. Without `--clear` the retry cannot run
+  at all, and the build ends on the Node fallback's error instead of the real
+  one.
+- **uv cannot always supply the declared floor.** It ships a fixed list of
+  managed interpreters; uv 0.11.17's newest 3.14 is 3.14.5, and
+  `yahoo-finance-mcp` wants 3.14.6. So after the venv is on the right *minor*, a
+  failed install retries once with `--python-version "$FLOOR"`. That is a
+  patch-level override and safe because wheel tags do not change within a minor
+  (everything is `cp314`), so no `--no-deps` and no second pass are needed.
+  Measured end to end — the sidecar comes up on CPython 3.14.5 with **mcp
+  2.1.1** and answers `tools/list` through supergateway, while the same image's
+  agent holds mcp 1.29.1 and google-adk 2.8.0.
 
 This is deliberately breaking: builds that used to go green now stop. Every one
 of them was producing an image with its MCP dependencies missing. If you touch
@@ -816,9 +1053,10 @@ cannot interleave a half-written history, and it runs even when the turn failed
 
 Deliberate limits, do not "fix" these without thinking:
 
-- **Only the conversation is persisted.** `_session_last_artifact` and
-  `builtins._ws_session_tokens` are process-local by design: the token is
-  re-sent on every request, and losing the regenerate cache costs one replay.
+- **The conversation and the surfaceId anchors are persisted; nothing else
+  is.** `_session_last_artifact` and `builtins._ws_session_tokens` stay
+  process-local by design: the token is re-sent on every request, and losing
+  the regenerate cache costs one replay.
 - **The OAuth token is stripped** from the persisted state
   (`_session_persistable_state` skips the `GEMINI_AUTHORIZATION_ID` key). It is
   short-lived and re-supplied per request; it has no business in Firestore.
@@ -827,6 +1065,21 @@ Deliberate limits, do not "fix" these without thinking:
   `Event.model_validate` is not worth the crash.
 - **Firestore caps a document at 1 MiB.** The flush halves the event list until
   the gzipped blob fits under 800 KB, and skips the write if it still does not.
+- **The surfaceId anchors ride in the same document** (v11.92, field
+  `surface_registry`). The cross-turn rescope guard in section 2.5 lived in
+  process memory while the cards it tracks live in the Gemini Enterprise
+  client, which outlives the instance: after a scale-to-zero the next turn
+  re-emitted a `surfaceId` the client had already bound to an older message,
+  that older card was patched instead, and the new turn rendered text only.
+  Three details are load-bearing. The anchors are stored as JSON **text**, not
+  a map — a `surfaceId` is model-authored and Firestore rejects a field name
+  matching `__.*__`, and that 400 would fail the whole flush and take the event
+  history with it. The restore runs **before** the ADK-version gate, because
+  the cards on screen do not care which ADK wrote the blob. And it **mutates**
+  the registry dict rather than rebinding it, because `_process_request` armed
+  the guard with that object before the restore ran. The oversized-blob skip
+  path still writes the anchors with `merge=True`; they are a few hundred bytes
+  and have nothing to do with why the history did not fit.
 
 ### 10.4 Why `--max-instances 1`
 
@@ -959,3 +1212,419 @@ verbatim. `find /.agent/skills -name SKILL.md` fails; `ls .agent/skills` from
 `/workspace/.agent/skills` and adds a "list it relative first, and build anyway
 if there are none" hedge. Leave the env spec `target` alone — the platform
 interprets it.
+
+### 11.4 Deliverable links follow `deliver_tid`, not the ticket you asked about (v11.62)
+
+An upload-only follow-up task is delegated with `deliverables_for_task_id` set
+to the ORIGINAL ticket, so its uploads land under `autonomous/<original>/`. The
+follow-up's execution doc records that prefix as `deliver_tid`, but both status
+tools re-collected links under the ticket id they were *called* with — so asking
+about the upload task reported "finished" with no links, and only an explicit
+"…and show me the download link" made the model go hunting for the donor ticket.
+`get_task_status` and `get_autonomous_task_status` now both resolve
+`_d.get("deliver_tid") or task_id`.
+
+Two related gaps closed in the same round:
+
+- `_inject_completed_tasks` truncates `result_summary` to 300 characters, which
+  cut off the link block completion appends to it (and those signatures would be
+  stale by the time the announcement fires anyway). The announcement now
+  re-lists storage through `_ma_collect_deliverables` and appends freshly signed
+  links, so the *first* mention of a finished task already carries them.
+- A task still at `working` can already have uploaded its files — an upload-only
+  follow-up finishes its uploads minutes before its run ends. That branch now
+  returns the links too, with a note that the task is still running.
+
+The general form: **a status tool is the only place the user's question lands,
+so it must answer with everything already true**, not with what was true when
+the record was written.
+
+---
+
+## 12. The domain-research 429 is a shared bucket, not a bug (v11.59)
+
+Symptom: **Research failed: AI Search Error: { "error": { "code": 429,
+"message": "Unable to submit request because you've reached the maximum number
+of requests with search as tool you can make per day. Remove Google search tool
+from"** — truncated mid-sentence, and reproducible on every retry.
+
+Two grounded call sites can produce it, both sending `tools:
+[{googleSearch:{}}]`: `researchCompanyByDomain()` and
+`callVertexAIWithSearch()` (BigQuery public-dataset discovery).
+
+**The cap is per project per day, not per user and not per token spend.** So on
+a project shared by a team, a builder who has made zero requests all day can be
+locked out by everyone else's traffic, and it comes back on its own at the
+midnight US/Pacific reset. Verified 2026-08-17: the identical request (same
+model, same `googleSearch` tool, same body) returned HTTP 200 against a
+dedicated project while a shared one was 429ing, which rules out the request
+shape, the model, and the code. The daily search cap is **not** visible in
+`gcloud alpha services quota list` — the 373 `aiplatform.googleapis.com` quota
+entries contain no per-day search metric — so do not go looking for a Cloud
+Quotas override to raise. The lever is the `PROJECT_ID` Script Property.
+
+The code lesson is about the error, not the quota: `describeVertexError_()` now
+names the project, the reset, and the shared-bucket mechanic, and logs the full
+body instead of `substring(0, 200)`. **A truncated upstream error reads as a bug
+in your own app.** The old message cut off at "Remove Google search tool from",
+which is advice this app cannot take — ungrounded research would invent the
+company facts the feature exists to ground.
+
+## 13. A2UI v0.8 → v0.9 and the composite catalog (v11.61)
+
+Gemini Enterprise now speaks A2UI **v0.9**, which unlocks a Gemini
+Enterprise-specific **composite catalog** (52 components) that v0.8's bundled
+*basic* catalog (18 primitives) could not reach. This was a **hard cutover** —
+there is no dual-version switch and no v0.8 code path left. Four things the
+generator used to fake are now native:
+
+| Faked on v0.8 | Native on v0.9 |
+|---|---|
+| Tables built from nested `Row`/`Column` of `Text` | `MaterialTable` / `GcbpTable` |
+| Charts rendered as generated PNG images | `VegaChart` |
+| Multi-view inline dashboards | `MaterialCard` + `MaterialTabs` + `MaterialTable` + `VegaChart` (`IFrameSrcdoc` is disabled in GE because inline iframe rendering is off by default) |
+| Long reports crammed into the chat stream | `Canvas` (resizable side panel) |
+
+No dependency bump: the already-pinned `a2ui-agent-sdk` revision ships
+everything v0.9 needs.
+
+### 13.1 The protocol delta
+
+| v0.8 | v0.9 |
+|---|---|
+| `{"beginRendering": {"surfaceId", "root": "root"}}` | `{"version":"v0.9","createSurface":{"surfaceId","catalogId"}}` — **no `root` key**; a component with `id == "root"` is required instead |
+| `{"surfaceUpdate": {...}}` | `{"version":"v0.9","updateComponents":{...}}` |
+| `{"dataModelUpdate":{"path","contents":[{"key","valueString"}]}}` | `{"version":"v0.9","updateDataModel":{"surfaceId","path","value": <plain JSON>}}` |
+| `{"deleteSurface":{...}}` | same, but `version` is now **required** |
+| `"component": {"Text": {…}}` (key wrapper) | `"component": "Text", …props` (flat discriminator) |
+| `{"literalString": "x"}` | `"x"` (a `{"path": "/a"}` binding is unchanged) |
+| `"children": {"explicitList": [...]}` | `"children": [...]` |
+| `distribution` / `alignment` | `justify` / `align` |
+| `"action": {"name":"sendText","context":[{"key","value"}]}` | `"action": {"event": {"name", "context": {…}}}` |
+| press arrives as a **TextPart** | press arrives as a **DataPart** (13.4) |
+
+**`"v0.9"` is not `VERSION_0_9`.** The wire value stamped on every message is
+the string `"v0.9"`; the SDK constant `a2ui.schema.constants.VERSION_0_9` is
+`"0.9"`. They are not interchangeable. `A2UI_CLIENT_MESSAGE_VERSION` in
+`agent_template/adk_agent/app/part_converters.py` holds the wire spelling.
+
+### 13.2 Catalog wiring — three sites that must agree
+
+1. **The setup script** fetches the catalog into the build context and *fails
+   the setup* if it is missing or unparseable
+   (`adk_agent/app/catalogs/gemini_enterprise_composite_catalog.json`). A
+   missing catalog is otherwise a fatal `A2uiSchemaManager` error three to five
+   minutes later at Cloud Run start. The Dockerfile re-asserts it parses and
+   has a `catalogId`.
+2. **`agent.py` and `fast_api_app.py`** build byte-identical managers
+   (`A2uiSchemaManager(version=VERSION_0_9, catalogs=[CatalogConfig.from_path(...)],
+   schema_modifiers=[remove_strict_validation])`). They must match: the second
+   one produces the selected catalog that the healer and the runtime validation
+   gate read. `remove_strict_validation` is required — without it the composite
+   catalog's `allOf` composition over-rejects.
+3. **The agent card**: extension URI `.../a2a-extension/a2ui/v0.9`, with the
+   catalog's own `catalogId` (the gstatic URL) advertised as a supported
+   catalog and repeated on every `createSurface`.
+
+**MIME**: `_build_a2ui_part` calls `create_a2ui_part(msg, version=VERSION_0_9)`.
+The SDK maps every version in `("0.8", "0.9", "v0.8", "v0.9")` to
+`application/json+a2ui` and everything else to `application/a2ui+json`. The
+constant names read backwards (`DEPRECATED_A2UI_MIME_TYPE` vs `A2UI_MIME_TYPE`)
+— `application/a2ui+json` is the *future* spelling that no shipping client
+reads yet. Dropping the kwarg degrades every card to plain text with a
+completely clean log. The Dockerfile `RUN` and `canary.py` both assert the
+resulting MIME.
+
+### 13.3 Only 18 components are strict — the rest of the healer is migration
+
+`remove_strict_validation` deletes `additionalProperties: false` but leaves
+`unevaluatedProperties: false`, which marks exactly the 18 basic v0.9
+primitives. **Every `Material*` component is schema-open**, so the unknown-property
+pruner can only ever fire on a basic component, and for Material components the
+healer's job is **shape migration**, not pruning. Two migrations are
+non-obvious, and both were found by feeding the healer real v0.8 payloads
+offline rather than by reading the diff:
+
+- **A v0.8 `Button` with a flat `label` must be promoted to `MaterialButton`,
+  not pruned.** The *basic* v0.9 `Button` has no `label` at all and *requires*
+  `child`, so pruning the label produced a childless `Button` that the gate
+  rejected, taking the whole card with it.
+- **`MultipleChoice`→`ChoicePicker` is more than a rename.** The selection
+  binding moved `selections`→`value`, and `variant` swapped enums entirely:
+  v0.8's `chips`/`dropdown` were presentation hints, v0.9's
+  `multipleSelection`/`mutuallyExclusive` encode cardinality. Without both, the
+  renamed component keeps a dead binding and an out-of-enum variant.
+
+Prop signatures verified against the catalog, each contradicting a plausible
+guess: **`MaterialSlider` has no `label`**; **`MaterialChips` has no `label`**;
+`MaterialTable` requires `columns` (`{header, field}`) + `rows`; `MaterialCard`
+requires `children`; `MaterialText.usageHint` is `h1..h5, caption, body,
+subtitle1/2, body1/2` — **`title` is not in it**; basic `Button` requires
+`child`; `MaterialIcon.icon` is a free-form Material Icons font name with **no
+enum**, so the old icon allowlist is gone. A dangling child id does **not** fail
+validation — the parser only enforces reachability from `root`; it renders as a
+hole in the card.
+
+### 13.4 The inbound press is a DataPart now — folded back to one shape
+
+This is the only genuinely new code path. Gemini Enterprise returns a press as
+
+```json
+{"version": "v0.9", "action": {"name": "...", "surfaceId": "...",
+ "sourceComponentId": "...", "timestamp": "...", "context": {"prompt": "...", ...}}}
+```
+
+The agents use ADK's `A2aAgentExecutor`, which maps parts 1:1 — an action
+DataPart would otherwise reach the model as raw JSON. `a2ui_client_action()`
+recognises it in `convert_a2a_part_to_genai_part`, and
+`a2ui_action_to_user_action()` folds it into the **existing**
+`{"userAction": {...}}` text envelope. **Converting at the edge instead of
+teaching each consumer a second dialect** is the load-bearing decision: the
+pre-flight gate, the briefing-answer harvester and the duplicate-press dedup all
+keep working unchanged. Presses are matched on the stable event name first
+(`preflight_confirm*`, `autonomous_start*`) with the text path as a fallback;
+per section 2.5, never gate a handler on a decorative context key.
+
+**`context.prompt` is the user's chat message.** Gemini Enterprise renders that
+literal string as what the user "said". Omit it and the user sees "User action
+triggered." Corollary: **encode intent in the event `name` too**, never only in
+the context — a name survives a model that forgets to bind a context value.
+
+### 13.5 Verification order (all four are cheap; do not skip them)
+
+1. `node --check` on a `.js` copy of Code.gs — the template-literal scan of
+   section 2. **A bare backtick inside generated Python shreds the heredoc**;
+   several crept in during this migration and most of them happened to
+   *balance*, so they parsed and would have failed only at runtime.
+2. `python3 validate_examples.py` — every example JSON parses, every template
+   Python file compiles, and no surface sends one prompt from two presses.
+3. **Offline protocol harness** — push each *server-authored* card (pre-flight,
+   autonomous briefing, suggestion chips, `deleteSurface`) through
+   `A2uiStreamParser(catalog=...).process_chunk('<a2ui-json>' + json + '</a2ui-json>')`.
+   That is the identical gate the runtime applies, and it covers the cards
+   `validate_examples.py` cannot see because they are built in Python. Write
+   negative controls too — a harness that accepts v0.8 keys is not testing
+   anything.
+4. **Feed the healer v0.8 input** and assert the healed result passes the real
+   gate.
+
+### 13.6 Six live-deploy failures the offline gates could not see
+
+None of these is a property of any card the generator authors.
+
+**(a) The `MaterialTabs` reachability shim must be installed in `agent.py`, not
+only where the healer lives.** `agent.py` runs
+`generate_system_prompt(validate_examples=True)` at IMPORT time, and
+`adk_agent/app/__init__.py` imports it before `fast_api_app.py` — so a shim that
+only exists next to the runtime gate installs too late, and any tabbed example
+kills the container at startup: `Component 'afterContent' is not reachable from
+'root'`. Meta-lesson: `validate_examples.py` had the shim while the runtime did
+not, making the **offline gate more permissive than production** — exactly
+backwards. When a validator needs a patch to pass, first prove the runtime
+applies the same patch on the same code path, in import order.
+
+**(b) A plain-string ADK instruction is a TEMPLATE, and the catalog contains
+`{expression}`.** ADK's `inject_session_state` raises `KeyError: Context
+variable not found` for any brace-wrapped identifier not in session state. The
+composite catalog's dynamic-string documentation contains a literal
+`` `${expression}` `` in a component description; once
+`generate_system_prompt(include_schema=True)` embeds the catalog into the
+instruction, **every turn dies before the model runs**. The fix is
+`bypass_state_injection`: pass an `InstructionProvider` (callable) instead of a
+string. Never hand ADK a string instruction that embeds third-party text
+(catalog, tool descriptions, fetched docs) — you do not control its braces, and
+the catalog is re-fetched at every setup, so a token can appear upstream at any
+time.
+
+**(c) v0.9 A2UI parts are ignored without the extension-activation echo.** A
+perfect turn server-side — `text`, `createSurface`, `updateComponents`,
+gate-clean, correct agent card — rendered as text-only. Per the A2A extension
+protocol, the client sends the extension URI in the `X-A2A-Extensions` REQUEST
+header and treats the extension as INACTIVE unless the server echoes it in the
+RESPONSE header. The v0.8 client rendered cards without the echo; the v0.9
+client does not. The SDK's own mechanism (`RequestContext.add_activated_extension`)
+**cannot work on the `message/stream` path**: `jsonrpc_app._create_response`
+builds the SSE response headers BEFORE the agent executor has run, so
+executor-side activation echoes only on non-streaming `message/send`. The fix is
+`A2uiExtensionEchoMiddleware` in `fast_api_app.py`, which echoes on both paths
+and logs `[a2ui_ext]`.
+
+**(d) The A2UI version is read from the REGISTERED inline agent card, not the
+live one.** With the echo in place the log showed `requested=...a2ui/v0.8`. The
+version in `X-A2A-Extensions` comes from the `jsonAgentCard` embedded in the
+Discovery Engine agent registration, **not** from
+`/.well-known/agent-card.json`, which is never re-fetched. Rule: **the agent
+card exists in two places; any capability change must touch both.** The
+registration is idempotent-overwrite, so re-running the setup script propagates
+the fix.
+
+> Corollary: **"re-run the setup script" means REGENERATE it first.** The script
+> is a self-contained artifact frozen at download time. Re-running an
+> already-downloaded `.sh` re-applies the *old* card and looks exactly like the
+> fix not working (registration `updateTime` advances, content does not).
+> Diagnose by reading `a2aAgentDefinition.jsonAgentCard` back from the API
+> rather than trusting that the script ran.
+
+**(e) The renderer reads `application/json+a2ui`, the MIME the SDK calls
+DEPRECATED.** With the extension negotiated end to end the cards *still* did not
+render. Everything observable server-side was clean, so the next step was to
+read the wire rather than the logs: `probe_wire.py` sends a real `message/stream`
+POST carrying the client's own `X-A2A-Extensions` header and dumps
+`metadata.mimeType` for every part. It showed `application/a2ui+json` — the
+value the migration deliberately chose, because `A2UI_MIME_TYPE` sounds current
+and `DEPRECATED_A2UI_MIME_TYPE` sounds obsolete. The names are aspirational.
+Two lessons: **when a symbol's name and its behaviour disagree, believe the
+reference implementation**, and **when the server logs are clean but the client
+shows nothing, stop reading logs and read the wire.**
+
+**(f) `A2uiStreamParserV09` bleeds one surface's components into the next.**
+Live symptom: pressing *any* Next Actions chip sent the *first* chip's prompt.
+`probe_wire.py` showed the turn's artifact carrying the card's 24 components a
+second time under the suggestions surface. `_seen_components` in the SDK parser
+is a **parser-lifetime cache keyed by component id**, but component ids are
+surface-scoped and v0.9 requires every surface's root to be literally `root`, so
+the second surface of a turn is filled by walking the topology from the *first*
+card's `root`. Fixed in `fast_api_app.py` by giving each surface its own
+component cache, swapped in the `surface_id` setter — the one choke point both
+`_handle_complete_object` and `_sniff_metadata` assign through.
+
+Two traps here, and the second cost the whole first day of the hunt:
+
+- **`A2uiStreamParser(catalog=None)` silently returns the v0.8 parser.** The
+  class is a factory: `__new__` dispatches on `catalog.version` and falls
+  through to `A2uiStreamParserV08` for anything that is not `VERSION_0_9`,
+  including no catalog at all. Six offline reproductions came back clean because
+  all six were exercising v0.8 code. Any repro of parser behaviour must assert
+  `type(parser).__name__ == 'A2uiStreamParserV09'` before it is worth anything.
+- **The SDK's own over-yield guard is v0.8-only.** `process_chunk` dedupes
+  repeated updates per surface by looking for the key `surfaceUpdate`, which no
+  longer exists under v0.9.
+
+**One press, one prompt.** The other half of that report was
+`examples/0.9/suggestion_chips.json` teaching a single `MaterialChips` with
+three `options` behind one `action`. `MaterialChips` carries ONE action for ALL
+of its options, so it structurally cannot give each chip its own prompt —
+whichever chip the user presses, the client sends that one action's prompt. A
+navigation chip bar must be a `MaterialRow` of `MaterialButton`s;
+`MaterialChips` stays correct for *bound selection* inside a form, where the
+value flows through the data model rather than the action. No schema can express
+this, so `validate_examples.py` checks it directly.
+
+---
+
+## 14. `skills/` — the same generator as an Agent Skill
+
+`skills/ge-demo-generator/` packages the whole generator as an Agent Skill so a
+coding agent can build and deploy a demo directly, without the Apps Script web
+app. It is a third front end over the same Google Cloud footprint, not a wrapper
+around `app/Code.gs`:
+
+```
+skills/ge-demo-generator/
+  ├─ SKILL.md      the lifecycle the agent follows, phase by phase
+  ├─ references/   the material it reads on demand (data modelling, IAM and
+  │                deployment, MCP and A2UI catalogs, Drive files, prompts)
+  └─ templates/    the files it scaffolds into the demo project, including
+                   scripts/verify_and_heal.py, the post-deploy checks it runs
+```
+
+### 14.1 `skills/…/templates/` is a fork of `agent_template/`, deliberately
+
+Both trees hold the same runtime files, and they are **allowed to diverge**:
+`agent_template/` is what the generated setup script fetches at run time
+(section 4), while the skill's copy is what the skill writes to disk itself. The
+skill's copy carries behaviour the web app does not have, so a change to one is
+not a change to the other. When you edit a runtime file, decide which front end
+you are fixing, and port it across only if the fix applies to both.
+
+Do not "de-duplicate" the two by symlinking or by pointing the skill at
+`agent_template/`: it would silently downgrade the skill to the web app's
+feature set, and the drift is not visible in a diff of file names.
+
+### 14.2 Conventions this sample adds to the skill
+
+The skill is developed against a live Google Cloud project and lands here with
+three transforms applied. Reapply all three when you update it:
+
+1. **Lint suppression.** Every `.py` file under `templates/` is a runtime
+   template, not sample code that the repository's linters should police, so
+   each one carries the same eight-line block the rest of this sample uses
+   (`# Deployed as a runtime template …` plus the `flake8`, `pylint`, `mypy`
+   and `ruff` opt-outs) directly under the license header. Each `Dockerfile`
+   under `templates/` carries `# hadolint ignore=` lines for the same reason,
+   every one of them with a comment saying why the rule does not apply.
+2. **Product naming**, matching `.github/actions/spelling/line_forbidden.patterns`:
+   the platform is written "Vertex AI Agent Platform" and never shortened, Agent
+   Engine is written bare with no platform prefix, "GCP" is written "Google
+   Cloud" in prose (the `GCP_ACCOUNT` variable keeps its name), and the SDK is
+   "Gen AI", two words.
+3. **Shell cleanliness.** `templates/setup_and_deploy.sh` and
+   `templates/scripts/cleanup.sh` are checked by the repository's super-linter,
+   so both must be `shellcheck`-clean and `shfmt`-clean at the two-space indent
+   the root `.editorconfig` sets. That indent rule applies to the whole file,
+   including the Python heredocs inside it — a continuation line aligned under
+   an opening parenthesis usually lands on an odd column, so break after the
+   parenthesis and indent by four instead. Verify all three before pushing:
+
+   ```bash
+   shellcheck -e SC1091 -e SC2086 skills/ge-demo-generator/templates/setup_and_deploy.sh
+   shfmt -d -i 2 skills/ge-demo-generator/templates/scripts/cleanup.sh
+   editorconfig-checker skills/ge-demo-generator/templates/setup_and_deploy.sh
+   ```
+
+### 14.3 Version bumps
+
+A behaviour change to the skill bumps its version in three places, which are
+checked against each other by eye and drift easily: the `version:` field in
+`SKILL.md`'s front matter, the version in `SKILL.md`'s title line, and the
+banner string in `templates/scripts/verify_and_heal.py`. The skill's version is
+independent of `APP_VERSION` in `app/Code.gs`.
+
+### 14.4 The Drive copy belongs to the account running the deploy (v2.13.0)
+
+The skill generates four documents the web app does not — a PDF audit report, an
+Excel ledger and two simulated scans — and puts them somewhere a demo can open
+them. They always go to `gs://$GCS_BUCKET_NAME/`, in every data-exploration mode.
+The Drive copy is the part with a history worth knowing.
+
+Until v2.11.x the upload ran through a CLI authenticated as whoever was operating
+the tool, so the folder belonged to that operator and the deploy target reached it
+through a share. Sharing across an organization boundary is frequently refused by
+policy, which handed the demo a link that 404s. Since v2.13.0
+`templates/scripts/generate_and_upload_external_files.py` calls the Drive v3 REST
+API directly with the access token `gcloud` already holds: `about.get` to identify
+the Drive and prove the scope, `files.list` + `files.create` for the folder, one
+`multipart/related` upload per document, `permissions.create` for link sharing.
+There is no CLI to install and no second identity — the folder is owned by the
+same account that owns the demo.
+
+Four properties are worth preserving if you touch this file:
+
+- **The Drive scope is the one real prerequisite.** A plain `gcloud auth login`
+  grants `cloud-platform` and nothing else, so Drive answers 403
+  `ACCESS_TOKEN_SCOPE_INSUFFICIENT`. The script does not treat that as a broken
+  feature: it skips the upload and names the fix, `gcloud auth login
+  --enable-gdrive-access --no-launch-browser`, in the summary and in the
+  completion banner. The `--no-launch-browser` half is not decoration: this
+  script runs from an agentic IDE terminal or a remote development machine,
+  neither of which has a local browser for gcloud to hand the consent flow to,
+  so without it the re-login stalls where nobody can see it.
+- **A folder with nothing in it is not a Drive copy.** Creating a folder and
+  writing into it are separate permissions, so every upload can fail under a
+  folder that was created fine. Reporting the folder URL then hands the demo a
+  link to nothing, so a zero-upload guard reports no Drive copy instead, with the
+  upload's own error, while keeping `folder_id` so cleanup still tears the empty
+  folder down.
+- **Re-running the deploy must not duplicate anything.** The folder is looked up
+  by name (with `'me' in owners`, or a same-named folder somebody shared with you
+  wins and the documents land in a stranger's Drive), and each document is looked
+  up inside it and replaced with `PATCH upload/drive/v3/files/<id>` when it is
+  already there. Two consecutive runs leave four files with the same ids, so a
+  link already pasted into a demo script survives the re-deploy.
+- **Cleanup trashes, it does not delete.** `templates/scripts/cleanup.sh` sends
+  `PATCH {"trashed": true}`, because this is a folder in a person's own Drive and
+  the reversible operation is the correct one there.
+
+Link sharing (`anyone`, `reader`) is best-effort: plenty of organizations forbid
+it, so the refusal is recorded as `share_error` and the banner notes it rather
+than failing the deploy. The owner can always open the folder.

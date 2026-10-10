@@ -1,20 +1,20 @@
-# GE Demo Generator
+# Gemini Enterprise Demo Generator
 
 > **Disclaimer:** This is not an officially supported Google product. This open-source solution is intended to enhance the Google customer experience. Support and/or new releases are handled on a best-effort basis.
 
-## What is the GE Demo Generator?
+## What is the Gemini Enterprise Demo Generator?
 
-The **GE Demo Generator** is a low-code web application built on Google Apps Script (GAS) that instantly synthesizes fully functional, domain-specific custom demo environments for **Gemini Enterprise**. By inputting your client's unique business challenges, the tool dynamically provisions datasets, an AI agent with MCP toolsets, and a real-time operations dashboard — all tailored to their business workflow.
+The **Gemini Enterprise Demo Generator** is a low-code web application built on Google Apps Script (GAS) that instantly synthesizes fully functional, domain-specific custom demo environments for **Gemini Enterprise**. By inputting your client's unique business challenges, the tool dynamically provisions datasets, an AI agent with MCP toolsets, and a real-time operations dashboard — all tailored to their business workflow.
 
 ### 💡 Business Value
 - **Hyper-Fast Pre-Sales**: Prepare hyper-personalized demonstrations within minutes instead of weeks.
 - **Reality-Grounded Demos**: The tool provisions actual BigQuery analytics, Google Maps grounding, and Firestore persistence databases for a raw, living demo experience.
 
 ### ⚙️ Technical Features
-- **Triple-Agent Autonomous Architecture**: Features a multi-agent execution framework powered by **Gemini 3.6 Flash** by default. Consists of a coordinator (`root_agent`) for chat, simple retrieval, and A2UI card rendering; an analytical sub-agent (`deep_analysis_agent`) for complex inline calculations; and a standalone background worker (`background_agent`) run asynchronously for long-running background tasks and recurring cron scheduled tasks. Models are configurable via `--model-analysis-agent` and `--model-root-agent` CLI flags.
+- **Triple-Agent Autonomous Architecture**: Features a multi-agent execution framework powered by **Gemini 3.8 Flash** by default. Consists of a coordinator (`root_agent`) for chat, simple retrieval, and A2UI card rendering; an analytical sub-agent (`deep_analysis_agent`) for complex inline calculations; and a standalone background worker (`background_agent`) run asynchronously for long-running background tasks and recurring cron scheduled tasks. Models are configurable via `--model-analysis-agent` and `--model-root-agent` CLI flags.
 - **Autonomous Workflow Pipelines & Guardrails**: Incorporates advanced background pipelines for both workflow-based operations (`SCAN -> ANALYZE -> PLAN -> EXECUTE -> VERIFY -> REPORT` with human-in-the-loop escalations) and deep analytical tasks. All background tasks are protected by an **Anti-Shallow Guard** self-check to ensure rigorous statistical results and extensive data tool coverage.
 - **MCP Server Catalog**: A curated catalog of pre-configured MCP servers (Government & Legal, Finance, Social, Japan-Specific, Environment & Weather, Google Official) with one-click add, recipe bundles, and custom URL import.
-- **A2UI (Agent-to-UI) Compliant**: Streams interactive Bento Grid layouts, Analytics Charts, and interactive confirmation cards using the A2UI SDK (`a2ui-agent-sdk`) via `<a2ui-json>` tags embedded in model responses. Integrates rich Welcome Card onboarding and step-by-step Workflow Execution Plan patterns.
+- **A2UI v0.9 + Material Catalog**: Streams interactive dashboards, data tables, Vega-Lite charts, side-panel canvases, and confirmation cards using the A2UI SDK (`a2ui-agent-sdk`) on **A2UI v0.9** with the Gemini Enterprise **composite catalog** (`Material*` components plus `Canvas`, `VegaChart`, `GcbpTable`), delivered via `<a2ui-json>` tags in model responses. Integrates rich Welcome Card onboarding and step-by-step Workflow Execution Plan patterns.
 - **A2A Protocol Server**: The synthesized agent runs as a FastAPI-based A2A server on Cloud Run, compatible with Gemini Enterprise agent registration, and features a standalone `/execute_task` worker for background processing.
 - **Real-Time Persistence Layer**: The agent modifies Firestore via MCP, and a synthesized **Data Viewer** dashboard (Flask on Cloud Run Functions Gen2) watches Firestore collections and updates in real-time.
 - **Automated Cloud Run Deployment**: Containerized deployment to Cloud Run (with `--min-instances 0` to control standby costs) and automated Discovery Engine registration for Gemini Enterprise compatibility.
@@ -25,7 +25,7 @@ The **GE Demo Generator** is a low-code web application built on Google Apps Scr
 - **Google Workspace MCP**: Optional integration with Gmail, Drive, Calendar, and People MCP servers via OAuth token passthrough.
 - **Managed Autonomous Agent (Antigravity)**: Optionally provisions a Pre-GA **Managed Agents API** agent (Antigravity harness) the demo agent can delegate long-horizon autonomous tasks to — live web research, code execution in a cloud sandbox, and professional deliverables (presentation decks, documents, PDFs, and web reports) crafted with mounted **SKILL.md** packs, with live progress streamed into the chat. Enabled by default; provisioning adds ~10 minutes (hidden behind the rest of the setup) and requires only the Vertex AI Agent Platform API — no allowlist.
 - **Workspace Authorization (No MCP)**: A lightweight alternative to Workspace MCP that adds Google sign-in for the demo user without any Developer-Preview allowlist. Combined with the Managed Agent, deliverables are saved to the user's Drive as native Google Slides / Docs / Sheets, and the autonomous agent acts on Gmail / Chat / Calendar via the open-source [Workspace CLI (gws)](https://github.com/googleworkspace/cli) inside its sandbox.
-- **Customer Domain Research**: Gemini-powered company research via Google Search grounding — automatically identifies business challenges and agent-automatable workflows from a customer's domain.
+- **Customer Domain Research**: Gemini-powered company research via Google Search grounding — automatically identifies business challenges and agent-automatable workflows from a customer's domain. The output language is detected from the company itself, or you can pick one from the selector next to the domain box; **Other language...** takes any language you type.
 - **Target Persona Selector**: Pick the demo's primary user (or describe a custom role) in the wizard — the selected persona becomes the protagonist of the generated scenario, demo guide, and agent instruction, keeping every step framed around that role's real workflow.
 - **Cross-Department Scenario Fabric**: Generated demos model realistic organizational hand-offs — records carry `current_department` / `next_department` fields plus an append-only audit-trail history, the agent narrates department-boundary transitions, and the Data Viewer surfaces the process stage as a badge. Quantitative grounding derived from domain research keeps the synthetic numbers business-plausible, and a coverage self-check warns when the demo guide fails to showcase a requested capability. Disable everything at once with the `DISABLE_CROSSORG_PACK` Script Property.
 - **Model Transparency**: Real-time model name announcement in the streaming response accordion for runtime visibility.
@@ -35,7 +35,7 @@ The **GE Demo Generator** is a low-code web application built on Google Apps Scr
 
 ## Table of Contents
 
-- [What is the GE Demo Generator?](#what-is-the-ge-demo-generator)
+- [What is the Gemini Enterprise Demo Generator?](#what-is-the-gemini-enterprise-demo-generator)
 - [1. Prerequisites](#1-prerequisites)
 - [2. Repository Setup](#2-repository-setup)
 - [3. Apps Script Project Setup](#3-apps-script-project-setup)
@@ -50,6 +50,7 @@ The **GE Demo Generator** is a low-code web application built on Google Apps Scr
 - [12. Cleanup](#12-cleanup)
 - [13. Guided Walkthrough & Tutorial](#13-guided-walkthrough--tutorial)
 - [14. System Architecture](#14-system-architecture)
+- [15. Agent Skill (Deploy from a Coding Agent)](#15-agent-skill-deploy-from-a-coding-agent)
 
 ---
 
@@ -75,12 +76,7 @@ The **GE Demo Generator** is a low-code web application built on Google Apps Scr
    cd generative-ai/search/gemini-enterprise/ge-demo-generator
    ```
 
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-
-3. Log in to Clasp (if not already):
+2. Authenticate with Clasp (if not already):
    ```bash
    clasp login
    ```
@@ -92,10 +88,11 @@ The **GE Demo Generator** is a low-code web application built on Google Apps Scr
 1. Create a new Google Apps Script project at [script.google.com](https://script.google.com).
 2. Find the **Script ID**:
    - Open the Apps Script editor → **Project Settings** (Gear Icon) → **IDs** → copy the **Script ID**.
-3. Create a **`.clasp.json`** file in the project root (`search/gemini-enterprise/ge-demo-generator/`) to point to your script and declare the `app` subdirectory (this file is Git-ignored):
+3. Create a **`.clasp.json`** file in the project root (`search/gemini-enterprise/ge-demo-generator/` — **do not** create this inside the `app/` directory):
    ```json
    {"scriptId": "YOUR_SCRIPT_ID", "rootDir": "app"}
    ```
+   > **Important**: Keep your terminal in the project root (`search/gemini-enterprise/ge-demo-generator/`). Do not `cd app`. Clasp reads `.clasp.json` from the current directory and deploys the contents of the `app/` folder specified by `"rootDir": "app"`.
 
 ---
 
@@ -112,17 +109,20 @@ The **GE Demo Generator** is a low-code web application built on Google Apps Scr
 
 ### Push / Pull Commands
 
-With the `.clasp.json` in place, use standard `clasp` commands:
+With the `.clasp.json` in place at the project root, verify the tracked files and use standard `clasp` commands:
 
 ```bash
+# Check tracked files (should list 4 files: appsscript.json, Code.gs, index.html, SetupError.html)
+clasp status
+
 # Push local code to the Apps Script project
 clasp push
 
 # Pull latest code from the Apps Script project
 clasp pull
 
-# Open the Apps Script project in your browser
-clasp open
+# Open the Apps Script editor in your browser
+clasp open-script
 ```
 
 ### Files Deployed to Apps Script
@@ -208,7 +208,7 @@ A complete setup is **two properties**: `PROJECT_ID` and `LOG_SHEET_URL`. Everyt
 | Property | Default | Description |
 |---|---|---|
 | `LOCATION` | `global` | Vertex AI Agent Platform API location (e.g., `us-central1`, `global`) |
-| `MODEL` | `gemini-3.6-flash` | Gemini model name for data generation |
+| `MODEL` | `gemini-3.8-flash` | Gemini model name for data generation |
 | `GITHUB_TOKEN` | (unset) | GitHub personal access token used for GitHub API calls when importing custom MCP servers from a repository URL. Only needed for private repos or to avoid unauthenticated rate limits |
 
 **Development and administration** — for working on this sample, not for running it. If you are deploying the app to give demos, skip these entirely:
@@ -262,12 +262,12 @@ TEMPLATE_SUBDIR  search/gemini-enterprise/ge-demo-generator/agent_template
 
 Even with correct scopes in `appsscript.json`, you **must** manually authorize the script to access your data.
 
-1. In the Apps Script editor, select the **`forceAuthorizeSpreadsheet`** function from the function dropdown.
+1. In the Apps Script editor, select the **`forceAuthorize`** function from the function dropdown.
 2. Click **Run** (▶️).
 3. A "Review Permissions" popup will appear. Follow the prompts to authorize access.
    - You may need to click **"Advanced" → "Go to [project name] (unsafe)"** if prompted with an "unverified app" warning.
 
-> **Note**: The `forceAuthorizeSpreadsheet` function explicitly triggers authorization for Spreadsheet scopes by performing a safe read test.
+> **Note**: The `forceAuthorize` function explicitly triggers authorization for Drive and Spreadsheet scopes by performing a safe read/write test.
 
 ---
 
@@ -276,7 +276,7 @@ Even with correct scopes in `appsscript.json`, you **must** manually authorize t
 1. In the Apps Script editor, click **Deploy > New Deployment**.
 2. Click the gear icon next to "Select type" and choose **Web App**.
 3. Configure:
-   - **Description**: e.g., `GE Demo Generator v1`
+   - **Description**: e.g., `Gemini Enterprise Demo Generator v1`
    - **Execute as**: `User accessing the web app`
    - **Who has access**: `Anyone` (or restrict as needed)
 4. Click **Deploy**.
@@ -295,7 +295,7 @@ When a user generates a demo through the web UI, the tool:
    - Provisions Firestore with operational documents
    - Deploys a **Data Viewer** web app (Flask on Cloud Run Functions Gen2)
    - Scaffolds an ADK agent project with MCP toolsets, A2UI support, and an A2A FastAPI server exposing a chat agent (`root_agent` and `deep_analysis_agent` sub-agent) and a background worker (`background_agent` via `/execute_task` runner)
-   - Defaults to **Gemini 3.6 Flash** for all three agents, with support for model override via `--model-analysis-agent` and `--model-root-agent` CLI flags
+   - Defaults to **Gemini 3.8 Flash** for all three agents, with support for model override via `--model-analysis-agent` and `--model-root-agent` CLI flags
    - Automatically builds a container image and deploys the Agent FastAPI server to **Cloud Run** (with `--min-instances 0` to control standby costs).
    - Provisions IAM bindings and environment configurations automatically.
    - Discovers any existing Gemini Enterprise Apps in your project and registers the newly deployed Cloud Run agent automatically.
@@ -327,9 +327,15 @@ ge-demo-generator/
 ├── deploy.sh                # Clasp deployment orchestrator script
 ├── validate_examples.py     # Validates agent_template JSON + Python files
 ├── check_deps.py            # Audits the PINNED_DEPS major caps (AGENTS.md 8)
-├── ge-demo-generator-lite/  # (Subproject) GE Demo Generator Lite — Workspace
-│                            #  demo-data generator for Gemini Enterprise
-│                            #  editions without custom-agent support
+├── skills/                  # (Section 15) The same generator as an Agent
+│   └── ge-demo-generator/   #  Skill, for a coding agent instead of the
+│       ├── SKILL.md         #  web app: the lifecycle it follows,
+│       ├── references/      #  the reference material it reads, and
+│       └── templates/       #  its own copy of the files it scaffolds
+├── ge-demo-generator-lite/  # (Subproject) Gemini Enterprise Demo Generator
+│                            #  Lite — Workspace demo-data generator for
+│                            #  Gemini Enterprise editions without
+│                            #  custom-agent support
 │   ├── appsscript.json
 │   ├── Code.gs
 │   ├── index.html
@@ -479,13 +485,18 @@ If the deploy step never returns, the container is almost certainly crashing at 
 - **Cause**: a dependency changed its module layout in a new release. Every pip requirement is capped at the next major in `PINNED_DEPS` (`app/Code.gs`) precisely to prevent this, but a package can still break within a major.
 - **Detection**: the Docker build runs `dep_smoke_test.py`, which resolves every third-party module and symbol the generated code imports and **fails the build** naming the offending one. Check the Cloud Build log for `FAIL: dependency import smoke test`; the `uv pip freeze` output printed just above it shows the versions actually installed.
 - **Fix**: cap the offending package below the breaking release in `PINNED_DEPS` and re-run. `python3 check_deps.py` shows the current floor / cap / resolved / latest for every requirement. Note that a cap belongs below the last version that is known to *work*, which is not always the newest one the resolver can reach -- `a2a-sdk` is held at `<0.4.0` for exactly this reason.
-- **Imported MCP servers**: cloned MCP server repos install their own dependencies into the same image. The build passes them a generated `constraints.txt` so a third-party requirement cannot upgrade past these caps. If such an install fails — including because it demands a version the caps forbid — the **build now stops and prints the reason**. It used to succeed quietly and produce an image whose MCP sidecar started but could not serve a tool call.
+- **Imported MCP servers**: cloned MCP server repos install their own dependencies into their own virtualenv inside the image, so a third-party requirement cannot reach the packages the agent imports from — a sidecar may hold `mcp` 2.x while the agent holds 1.x. If such an install fails, the **build stops and prints the reason**. It used to succeed quietly and produce an image whose MCP sidecar started but could not serve a tool call.
  
 #### 7. Endless "The agent requires additional authorization" Prompt
 If every message comes back with the Gemini Enterprise authorization card, you complete consent, and the very next turn asks again — with no error anywhere in the UI, in Cloud Run, or in the agent logs:
 - **Cause**: Consent only validates the `client_id` and the redirect URI, so it succeeds even when the code-to-token exchange that Gemini Enterprise performs afterwards fails. The usual reason is a stored OAuth client secret that no longer matches the client (rotated or deleted). Because every demo in a project shares one OAuth client, this breaks **all** Workspace-authorization demos at once.
 - **Detection**: The setup script now probes the token endpoint with a throwaway code before wiring the credentials into Gemini Enterprise. `invalid_grant` means the credentials are good (only the fake code was rejected); `invalid_client` means the secret is stale.
 - **Fix**: Add a **new secret to the existing OAuth client** (the `client_id` and redirect URI stay valid) at `https://console.cloud.google.com/auth/clients`, then re-run the setup script — it prompts for the new secret, verifies it, stores it as a new Secret Manager version, and refreshes the authorization resource.
+ 
+#### 8. "Research failed" with a 429 About Search as a Tool
+If Customer Domain Research fails with `code: 429` and a message about "the maximum number of requests with search as tool you can make per day":
+- **Cause**: the daily Google Search grounding cap is enforced **per project, per day**. On a project shared with other people, your own request count is irrelevant — the bucket is drained collectively, and it refills at midnight US/Pacific.
+- **Fix**: point the `PROJECT_ID` Script Property at a project with its own quota, or wait for the reset. There is no Cloud Quotas entry for this limit to raise. The scenario box still works by hand in the meantime; research is not required to build a demo.
  
 ---
  
@@ -518,13 +529,13 @@ When you open an issue, please include:
 
 ## 14. System Architecture
 
-This document describes the system architecture of the GE Demo Generator and the synthesized demo environments it produces.
+This document describes the system architecture of the Gemini Enterprise Demo Generator and the synthesized demo environments it produces.
 
 ---
 
 ### 14.1 Overview
 
-The GE Demo Generator is a low-code accelerator built on Google Apps Script that allows Customer Engineers to instantly synthesize fully functional AI agent demo environments for any business domain. It generates domain-specific datasets, an ADK-based agent with MCP toolsets, and a real-time operations dashboard — all provisioned into the user's own Google Cloud project.
+The Gemini Enterprise Demo Generator is a low-code accelerator built on Google Apps Script that allows Customer Engineers to instantly synthesize fully functional AI agent demo environments for any business domain. It generates domain-specific datasets, an ADK-based agent with MCP toolsets, and a real-time operations dashboard — all provisioned into the user's own Google Cloud project.
 
 The system is divided into two main parts: the **Generator Dashboard** (the Apps Script web app) and the **Synthesized Demo Environment** (the Google Cloud resources created by the setup script).
 
@@ -537,7 +548,7 @@ The system is divided into two main parts: the **Generator Dashboard** (the Apps
 A Tailwind-based Single Page Application (~388 KB, ~7,000 lines) that provides:
 
 - **Demo Wizard**: Step-by-step UI to input business requirements, configure options (row count, table count, public dataset enrichment), and generate the demo.
-- **Customer Domain Research**: Gemini-powered company research via Google Search grounding — automatically identifies business challenges and agent-automatable workflows from a customer's domain.
+- **Customer Domain Research**: Gemini-powered company research via Google Search grounding — automatically identifies business challenges and agent-automatable workflows from a customer's domain. The output language is detected from the company itself, or you can pick one from the selector next to the domain box; **Other language...** takes any language you type.
 - **Data Preview**: Inline data tables and ER diagrams for the generated datasets.
 - **Premium Live Synthesis Progress Dashboard**: Displays a high-fidelity interactive Google Cloud target architecture blueprint SVG during synthesis. It shows the active pulsing/success glowing states across BigQuery, Gemini Agent, and Cloud Run nodes with flowing SVG stream lines. Includes a context-sensitive animated **Dynamic Tips Carousel** rotating every 12 seconds, a real-time **Elapsed Timer**, and an **Automatic Retry Mechanism** (up to 2 retries) for robust Apps Script code generation and parsing recovery. Exposes active model name (`generatorModel`) for transparency.
 - **Setup Script Export**: One-click copy of the generated bash setup script for Cloud Shell.
@@ -600,12 +611,12 @@ When the user runs the generated setup script in Cloud Shell, the following arch
 
 #### Agent Architecture
 
-The synthesized agent uses a **triple-agent/multi-agent autonomous execution** architecture to achieve high-depth operational execution alongside optimal latency and cost. The architecture features three specialized agent instances, all utilizing **Gemini 3.6 Flash** by default for rapid response and high token efficiency:
+The synthesized agent uses a **triple-agent/multi-agent autonomous execution** architecture to achieve high-depth operational execution alongside optimal latency and cost. The architecture features three specialized agent instances, all utilizing **Gemini 3.8 Flash** by default for rapid response and high token efficiency:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  root_agent (LlmAgent — Coordinator)                         │
-│  Model: gemini-3.6-flash (AGENT_MODEL_LITE)                  │
+│  Model: gemini-3.8-flash (AGENT_MODEL_LITE)                  │
 │  Role: Chat coordinator, simple queries, A2UI card builder    │
 │  Instruction: Generated system prompt + A2UI schema          │
 │               + Background-First Routing Rules               │
@@ -621,7 +632,7 @@ The synthesized agent uses a **triple-agent/multi-agent autonomous execution** a
 │                                                              │
 │  ┌──────────────────────────────────────────────────────┐    │
 │  │  deep_analysis_agent (LlmAgent — Analytical Sub)     │    │
-│  │  Model: gemini-3.6-flash (AGENT_MODEL)                │    │
+│  │  Model: gemini-3.8-flash (AGENT_MODEL)                │    │
 │  │  Role: Complex inline multi-step reasoning            │    │
 │  │  Tools: Same shared toolset                           │    │
 │  │  Transfer: Returns to root_agent on completion        │    │
@@ -635,7 +646,7 @@ The synthesized agent uses a **triple-agent/multi-agent autonomous execution** a
 
 ┌──────────────────────────────────────────────────────────────┐
 │  background_agent (LlmAgent — Standalone Worker)              │
-│  Model: gemini-3.6-flash (AGENT_MODEL)                       │
+│  Model: gemini-3.8-flash (AGENT_MODEL)                       │
 │  Role: Autonomous background operations & deep analysis       │
 │  Instruction: Main instruction + Pipeline guardrails         │
 │               + Anti-Shallow Guard (no UI / no transfers)    │
@@ -700,14 +711,16 @@ A lightweight Flask application deployed as a **Cloud Run Function (Gen2)** that
 
 The A2UI integration provides rich interactive UI components in Gemini Enterprise:
 
-- **Schema Management**: `A2uiSchemaManager` with `BasicCatalog` provides schema validation and example injection into the system prompt.
+- **Protocol Version**: **A2UI v0.9** (`VERSION_0_9`). Every server-to-client message is stamped `"version": "v0.9"` and carries exactly one of `createSurface` / `updateComponents` / `updateDataModel` / `deleteSurface`. `DataPart`s use the `application/json+a2ui` MIME type — despite the SDK naming it `DEPRECATED_A2UI_MIME_TYPE`, it is the only one Gemini Enterprise renders.
+- **Schema Management**: `A2uiSchemaManager(version=VERSION_0_9, catalogs=[CatalogConfig.from_path(...)], schema_modifiers=[remove_strict_validation])` loads the **Gemini Enterprise composite catalog** (52 components: 28 `Material*`, the 18 basic v0.9 primitives, and the Gemini Enterprise-only `Canvas`, `VegaChart`, `GcbpTable`, `InteractiveChart`; `IFrameSrcdoc` and `IFrameUrl` are present in the upstream catalog file but disabled in the agent prompt and healed at runtime because inline A2UI iframe rendering is disabled by default in Gemini Enterprise). The catalog JSON is fetched into `adk_agent/app/catalogs/` at setup time; its `catalogId` is the gstatic URL it was fetched from.
 - **Tag-Based Extraction**: The agent wraps UI payloads in `<a2ui-json>` tags. The stream parser extracts, heals, and validates these payloads.
 - **DataPart Conversion**: A2UI JSON payloads are converted to A2A `DataPart` objects for proper rendering in Gemini Enterprise.
-- **Interactive Components**: Cards, Columns, Rows, Buttons (with `sendText` actions), Dividers, Tabs, Text, Icons, Images, Modals, Forms (with `dataModelUpdate` for data binding), Lists, and suggestion chip bars.
-- **Form Data Binding**: Interactive forms use `dataModelUpdate` messages for initial values and `path`-based bindings for TextField (supporting `shortText` and multi-line `longText`), Slider, CheckBox, and DateTimeInput components.
-- **Welcome Onboarding Card**: Rendered on the first user interaction. Features a customized list of key capabilities using Icon + Text rows and action buttons designed to initiate immediate/background operations.
+- **Interactive Components**: `MaterialCard`, `MaterialColumn`/`MaterialRow`, `MaterialButton` (flat `label`), `MaterialDivider`, `MaterialTabs`, `MaterialText`, `MaterialIcon`, `MaterialImage`, `MaterialDialog`, `MaterialTable`, `MaterialChips`/`MaterialSelect`/`MaterialInput`, `VegaChart`, `Canvas`, and suggestion chip bars. A component is flat — `{"id", "component": "MaterialText", "text": "..."}` — with plain JSON values and a plain array of child ids; the client renders the component whose id is `root`.
+- **Form Data Binding**: Interactive forms use `updateDataModel` messages (`{surfaceId, path, value}` with plain JSON values) for initial state, and `{"path": "/form/..."}` bindings on `MaterialInput`, `MaterialSelect`, `MaterialChips`, `MaterialSlider`, `MaterialCheckbox`, and `MaterialDatepicker`.
+- **Actions & Presses**: An interactive component dispatches `{"action": {"event": {"name", "context": {"prompt": "..."}}}}`. Gemini Enterprise posts the literal `context.prompt` as the user's chat message (omit it and the user sees "User action triggered"), and the intent is encoded in the event `name` so it survives a lost context value. The press comes back as an A2A **DataPart** `{"version": "v0.9", "action": {...}}`; `part_converters.py` folds it into this runtime's `{"userAction": {...}}` text envelope at the edge, so every downstream press consumer is unchanged.
+- **Welcome Onboarding Card**: Rendered on the first user interaction. Features a customized list of key capabilities using `MaterialIcon` + `MaterialText` rows and action buttons designed to initiate immediate/background operations.
 - **Workflow Execution Plan**: Standardized layout for batch operations. Features a mandatory subtitle declaring sequential pipeline step order, connector arrows (` ↓ `), numbered step prefixes (`Step N/M :`), real-time status icons (`play_arrow`, `check_circle`, `hourglass_empty`, `pan_tool`, `error`), and dual control rows (Execution Mode buttons and Control buttons). Employs a progress variant for real-time console status sync.
-- **Context-Aware Suggestion Chips**: Section added at the end of every response using a dedicated Column schema (root -> Column [Divider, Section Title '💡 Next Actions', chipRow]) with context-aware labels to expand conversation paths.
+- **Context-Aware Suggestion Chips**: Section added at the end of every response on its own `suggestions` surface (root -> `MaterialRow` of `MaterialButton`s) with context-aware labels to expand conversation paths. Spacing comes from the `style` allowlist (`gap`, `marginTop`, ...), not from spacer components.
 - **Fallback**: If the stream parser fails, a regex-based fallback extracts A2UI blocks to prevent data loss.
 
 ---
@@ -849,7 +862,7 @@ graph TD
 The setup script deploys the agent directly to Google Cloud Run and supports model overrides and automated cleanup via CLI flags:
 
 ```bash
-# Default models (gemini-3.6-flash)
+# Default models (gemini-3.8-flash)
 bash setup-demo-xxx.sh
 
 # Override models
@@ -910,7 +923,8 @@ After running the setup script, the following directory structure is created:
 │       │                              # + Workspace MCP + Slack MCP
 │       ├── fast_api_app.py            # A2A server, background task runner, streaming, middleware
 │       ├── part_converters.py         # A2A↔Gen AI type conversion utilities
-│       └── examples/0.8/              # A2UI BasicCatalog example JSONs
+│       ├── examples/0.9/              # A2UI v0.9 composite-catalog example JSONs
+│       └── catalogs/                  # gemini_enterprise_composite_catalog.json (fetched at setup)
 └── viewer_app/
     └── main.py                        # Flask Data Viewer (deployed to Cloud Run Functions)
 ```
@@ -923,10 +937,10 @@ After running the setup script, the following directory structure is created:
 
 1. **Prompt**: The user says in Gemini Enterprise: *"Approve safety issue #104 and log update notes."*
 2. **A2A Routing**: Gemini Enterprise sends the message via A2A JSON-RPC to the Cloud Run FastAPI server.
-3. **Model Announcement**: The server emits a `🧠 Model: gemini-3.6-flash` status event in the thinking accordion.
+3. **Model Announcement**: The server emits a `🧠 Model: gemini-3.8-flash` status event in the thinking accordion.
 4. **Reasoning**: The `root_agent` identifies a write request and plans to use the Firestore MCP toolset.
-5. **Confirmation**: The agent renders an A2UI confirmation card (via `<a2ui-json>` tags) showing before/after data with Approve/Reject buttons and a `dataModelUpdate` for pre-populated fields.
-6. **User Approval**: The user clicks "Approve" in the interactive card, which sends a `sendText` action back to the agent.
+5. **Confirmation**: The agent renders an A2UI confirmation card (via `<a2ui-json>` tags) showing before/after data with Approve/Reject buttons and an `updateDataModel` for pre-populated fields.
+6. **User Approval**: The user clicks "Approve" in the interactive card, which sends an action DataPart (`action.event.name` plus a `context.prompt` string) back to the agent.
 7. **Tool Execution**: The agent invokes the Firestore MCP `update_document` tool.
 8. **A2UI Cleanup**: The agent issues a `deleteSurface` command to remove the confirmation card, then renders a success summary card with follow-up suggestion chips.
 9. **Real-time Sync**: The Data Viewer dashboard independently detects the Firestore change and updates its Bento Grid display.
@@ -968,6 +982,66 @@ After running the setup script, the following directory structure is created:
 - **ReflectAndRetryToolPlugin**: Automatically retries failed tool calls with error reflection, improving robustness against transient MCP failures.
 - **Tool Name Deduplication**: `get_custom_mcp_toolsets` uses `tool_name_prefix` to prevent "Duplicate function declaration" errors when multiple MCP servers expose identical tool names.
 - **Retry Options**: Both models are configured with `HttpRetryOptions` (8 attempts, exponential backoff 2s–60s) specifically targeting HTTP 429 (Resource Exhausted) errors.
+
+---
+
+## 15. Agent Skill (Deploy from a Coding Agent)
+
+`skills/ge-demo-generator/` is the same generator packaged as an **Agent Skill** — a
+`SKILL.md` plus its reference material and file templates — for people who would rather
+drive the whole thing from a coding agent than from the web app.
+
+The two front ends build the same demo and differ in who does the work:
+
+| | Web app (sections 1-14) | Agent Skill (this section) |
+|---|---|---|
+| You need | An Apps Script deployment | A coding agent that reads `SKILL.md`, plus `gcloud`, `python3` and [`uv`](https://docs.astral.sh/uv/) |
+| Research | The wizard asks, Gemini researches the domain | The agent researches the domain and confirms the requirements in conversation |
+| Sample data | Synthesized by the generator | Synthesized by the agent, per the data model you approve |
+| Deployment | You run the generated setup script in Cloud Shell | The agent runs it and reads the output back |
+| Failures | You read the log | The agent verifies eight layers after the deploy and repairs what it can |
+
+### Installing it
+
+Copy the skill directory to wherever your agent looks for skills, or point the agent at it
+in a checkout of this repository:
+
+```bash
+git clone --filter=blob:none --sparse https://github.com/GoogleCloudPlatform/generative-ai.git
+cd generative-ai
+git sparse-checkout set search/gemini-enterprise/ge-demo-generator/skills
+```
+
+Then ask for a demo in your own words — "build me a Gemini Enterprise demo for example.com"
+— or invoke it by name if your agent supports slash commands (`/ge-demo-generator`).
+
+### What it does
+
+1. **Researches the customer** from a domain or a business goal, in the language that domain
+   implies, and offers the automatable workflows it finds.
+2. **Confirms the requirements, then shows a Demo Architecture & Data Model Plan** — a Mermaid
+   ER diagram, the Drive file lineage, the target project — and waits for your approval.
+   Nothing is created before that gate.
+3. **Generates the sample data and the external documents** (PDF, Excel, scanned images) and
+   uploads them to the Google Drive of the account running the deploy, over the Drive v3 REST
+   API with the token `gcloud` already holds. Sign in with `gcloud auth login
+   --enable-gdrive-access` first — a plain login carries no Drive scope, and without it the
+   documents still reach Cloud Storage but there is no Drive copy.
+4. **Scaffolds the ADK multi-agent project** from `templates/`, filling in only the
+   business-context placeholders.
+5. **Provisions in dependency order** — BigQuery and Firestore, the Agent Engine Sandbox, the
+   Data Viewer, the agent on Cloud Run, the background task subscription.
+6. **Registers the agent with Gemini Enterprise**, with Workspace authorization when asked for.
+7. **Verifies the deployment across eight layers and repairs what it can** before reporting.
+8. **Hands back the links and seven demo prompts**, localized, and a one-command teardown.
+
+### Its templates are its own
+
+`skills/ge-demo-generator/templates/` is a separate copy of the runtime files from
+`agent_template/`, and the two are allowed to differ: `agent_template/` is what the web app's
+setup script fetches at run time, while the skill's copy is what the skill scaffolds and
+carries features the web app does not have (it generates external sample documents and can
+index them with a DataStore connector, for one). Change one and you have not changed the other.
 
 ---
 

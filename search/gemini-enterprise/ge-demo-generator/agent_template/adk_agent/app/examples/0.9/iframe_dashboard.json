@@ -1,0 +1,228 @@
+[
+  {
+    "version": "v0.9",
+    "createSurface": {
+      "surfaceId": "html-dashboard",
+      "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json"
+    }
+  },
+  {
+    "version": "v0.9",
+    "updateComponents": {
+      "surfaceId": "html-dashboard",
+      "components": [
+        {
+          "id": "root",
+          "component": "MaterialCard",
+          "children": [
+            "col"
+          ]
+        },
+        {
+          "id": "col",
+          "component": "MaterialColumn",
+          "children": [
+            "title",
+            "divider1",
+            "kpiRow",
+            "tabs",
+            "note"
+          ],
+          "align": "stretch",
+          "style": {
+            "gap": "10px"
+          }
+        },
+        {
+          "id": "title",
+          "component": "MaterialText",
+          "text": "📈 Regional Performance Dashboard",
+          "usageHint": "h2"
+        },
+        {
+          "id": "divider1",
+          "component": "MaterialDivider"
+        },
+        {
+          "id": "kpiRow",
+          "component": "MaterialRow",
+          "children": [
+            "kpi1",
+            "kpi2",
+            "kpi3"
+          ],
+          "justify": "spaceEvenly",
+          "align": "start",
+          "style": {
+            "gap": "8px"
+          }
+        },
+        {
+          "id": "kpi1",
+          "component": "MaterialColumn",
+          "children": [
+            "kpi1Val",
+            "kpi1Lbl"
+          ],
+          "justify": "start",
+          "align": "center"
+        },
+        {
+          "id": "kpi1Val",
+          "component": "MaterialText",
+          "text": "$12.4M",
+          "usageHint": "h3"
+        },
+        {
+          "id": "kpi1Lbl",
+          "component": "MaterialText",
+          "text": "Total Revenue",
+          "usageHint": "caption"
+        },
+        {
+          "id": "kpi2",
+          "component": "MaterialColumn",
+          "children": [
+            "kpi2Val",
+            "kpi2Lbl"
+          ],
+          "justify": "start",
+          "align": "center"
+        },
+        {
+          "id": "kpi2Val",
+          "component": "MaterialText",
+          "text": "+8.2%",
+          "usageHint": "h3"
+        },
+        {
+          "id": "kpi2Lbl",
+          "component": "MaterialText",
+          "text": "YoY Growth",
+          "usageHint": "caption"
+        },
+        {
+          "id": "kpi3",
+          "component": "MaterialColumn",
+          "children": [
+            "kpi3Val",
+            "kpi3Lbl"
+          ],
+          "justify": "start",
+          "align": "center"
+        },
+        {
+          "id": "kpi3Val",
+          "component": "MaterialText",
+          "text": "23",
+          "usageHint": "h3"
+        },
+        {
+          "id": "kpi3Lbl",
+          "component": "MaterialText",
+          "text": "Open Anomalies",
+          "usageHint": "caption"
+        },
+        {
+          "id": "tabs",
+          "component": "MaterialTabs",
+          "tabs": [
+            {
+              "label": "By Region",
+              "content": "regionTable"
+            },
+            {
+              "label": "Anomalies",
+              "content": "anomalyTable"
+            }
+          ]
+        },
+        {
+          "id": "regionTable",
+          "component": "MaterialTable",
+          "columns": [
+            {
+              "header": "Region",
+              "field": "region"
+            },
+            {
+              "header": "Revenue",
+              "field": "revenue"
+            },
+            {
+              "header": "YoY",
+              "field": "yoy"
+            }
+          ],
+          "rows": [
+            {
+              "region": "APAC",
+              "revenue": "$5.4M",
+              "yoy": "+15.3%"
+            },
+            {
+              "region": "EMEA",
+              "revenue": "$4.1M",
+              "yoy": "+5.1%"
+            },
+            {
+              "region": "AMER",
+              "revenue": "$2.9M",
+              "yoy": "+2.4%"
+            }
+          ],
+          "style": {
+            "marginTop": "8px"
+          }
+        },
+        {
+          "id": "anomalyTable",
+          "component": "MaterialTable",
+          "columns": [
+            {
+              "header": "Region",
+              "field": "region"
+            },
+            {
+              "header": "Open",
+              "field": "open"
+            },
+            {
+              "header": "Status",
+              "field": "status"
+            }
+          ],
+          "rows": [
+            {
+              "region": "APAC",
+              "open": "12",
+              "status": "⚠️ Review required"
+            },
+            {
+              "region": "EMEA",
+              "open": "7",
+              "status": "✅ On track"
+            },
+            {
+              "region": "AMER",
+              "open": "4",
+              "status": "✅ On track"
+            }
+          ],
+          "style": {
+            "marginTop": "8px"
+          }
+        },
+        {
+          "id": "note",
+          "component": "MaterialText",
+          "text": "Rendered inline with native A2UI v0.9 components (MaterialCard + MaterialTabs + MaterialTable).",
+          "usageHint": "caption",
+          "style": {
+            "marginTop": "8px"
+          }
+        }
+      ]
+    }
+  }
+]

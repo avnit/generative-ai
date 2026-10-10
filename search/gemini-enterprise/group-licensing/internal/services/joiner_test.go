@@ -55,7 +55,7 @@ const projectNumber = "123456789"
 // billing account with one subscription per SKU+project+location.
 func licenseIndexForProject(number string) models.LicenseConfigIndex {
 	return models.LicenseConfigIndex{
-		{SKU: models.SKUAgentspaceBusiness, ProjectNumber: number, Location: models.LocationGlobal}: {{Path: "projects/" + number + "/locations/global/licenseConfigs/biz-config", AllocatedCount: 100}},
+		{SKU: models.SKUGeminiBusiness, ProjectNumber: number, Location: models.LocationGlobal}: {{Path: "projects/" + number + "/locations/global/licenseConfigs/biz-config", AllocatedCount: 100}},
 		{SKU: models.SKUEnterprise, ProjectNumber: number, Location: models.LocationGlobal}:         {{Path: "projects/" + number + "/locations/global/licenseConfigs/ent-config", AllocatedCount: 50}},
 	}
 }
@@ -113,7 +113,7 @@ func TestJoinerService_Run_HappyPath_SKUPrecedence(t *testing.T) {
 
 	cfg := newJoinerConfig(map[string]config.ProjectConfig{
 		projectID: {
-			{SubscriptionTier: models.SKUAgentspaceBusiness, Location: models.LocationGlobal, Groups: []string{groupBiz}},
+			{SubscriptionTier: models.SKUGeminiBusiness, Location: models.LocationGlobal, Groups: []string{groupBiz}},
 			{SubscriptionTier: models.SKUEnterprise, Location: models.LocationGlobal, Groups: []string{groupEnt}},
 		},
 	})
@@ -156,7 +156,7 @@ func TestJoinerService_Run_DryRun_NoAPIWrite(t *testing.T) {
 
 	cfg := newJoinerConfig(map[string]config.ProjectConfig{
 		projectID: {
-			{SubscriptionTier: models.SKUAgentspaceBusiness, Location: models.LocationGlobal, Groups: []string{group}},
+			{SubscriptionTier: models.SKUGeminiBusiness, Location: models.LocationGlobal, Groups: []string{group}},
 		},
 	})
 
@@ -185,7 +185,7 @@ func TestJoinerService_Run_FetchLicenseConfigIndexError_ReturnsError(t *testing.
 
 	cfg := newJoinerConfig(map[string]config.ProjectConfig{
 		"proj-x": {
-			{SubscriptionTier: models.SKUAgentspaceBusiness, Location: models.LocationGlobal, Groups: []string{"grp@example.com"}},
+			{SubscriptionTier: models.SKUGeminiBusiness, Location: models.LocationGlobal, Groups: []string{"grp@example.com"}},
 		},
 	})
 
@@ -212,7 +212,7 @@ func TestJoinerService_Run_ResolveProjectNumberError_ReturnsError(t *testing.T) 
 
 	cfg := newJoinerConfig(map[string]config.ProjectConfig{
 		"proj-x": {
-			{SubscriptionTier: models.SKUAgentspaceBusiness, Location: models.LocationGlobal, Groups: []string{"grp@example.com"}},
+			{SubscriptionTier: models.SKUGeminiBusiness, Location: models.LocationGlobal, Groups: []string{"grp@example.com"}},
 		},
 	})
 
@@ -245,7 +245,7 @@ func TestJoinerService_Run_ListMembersError_ReturnsWrappedError(t *testing.T) {
 
 	cfg := newJoinerConfig(map[string]config.ProjectConfig{
 		projectID: {
-			{SubscriptionTier: models.SKUAgentspaceBusiness, Location: models.LocationGlobal, Groups: []string{group}},
+			{SubscriptionTier: models.SKUGeminiBusiness, Location: models.LocationGlobal, Groups: []string{group}},
 		},
 	})
 
@@ -284,7 +284,7 @@ func TestJoinerService_Run_BatchUpdateError_ReturnsError(t *testing.T) {
 
 	cfg := newJoinerConfig(map[string]config.ProjectConfig{
 		projectID: {
-			{SubscriptionTier: models.SKUAgentspaceBusiness, Location: models.LocationGlobal, Groups: []string{group}},
+			{SubscriptionTier: models.SKUGeminiBusiness, Location: models.LocationGlobal, Groups: []string{group}},
 		},
 	})
 
@@ -333,7 +333,7 @@ func TestJoinerService_Run_MultiPagePagination_AllMembersCollected(t *testing.T)
 
 	cfg := newJoinerConfig(map[string]config.ProjectConfig{
 		projectID: {
-			{SubscriptionTier: models.SKUAgentspaceBusiness, Location: models.LocationGlobal, Groups: []string{group}},
+			{SubscriptionTier: models.SKUGeminiBusiness, Location: models.LocationGlobal, Groups: []string{group}},
 		},
 	})
 
@@ -370,7 +370,7 @@ func TestJoinerService_Run_EmptyGroup_NoBatchCall(t *testing.T) {
 
 	cfg := newJoinerConfig(map[string]config.ProjectConfig{
 		projectID: {
-			{SubscriptionTier: models.SKUAgentspaceBusiness, Location: models.LocationGlobal, Groups: []string{group}},
+			{SubscriptionTier: models.SKUGeminiBusiness, Location: models.LocationGlobal, Groups: []string{group}},
 		},
 	})
 
@@ -397,7 +397,7 @@ func TestJoinerService_Run_ContextCancelled_ReturnsError(t *testing.T) {
 
 	cfg := newJoinerConfig(map[string]config.ProjectConfig{
 		"proj-ctx-joiner": {
-			{SubscriptionTier: models.SKUAgentspaceBusiness, Location: models.LocationGlobal, Groups: []string{"grp@example.com"}},
+			{SubscriptionTier: models.SKUGeminiBusiness, Location: models.LocationGlobal, Groups: []string{"grp@example.com"}},
 		},
 	})
 
@@ -439,7 +439,7 @@ func TestJoinerService_Run_GroupTypeMembersIgnored(t *testing.T) {
 
 	cfg := newJoinerConfig(map[string]config.ProjectConfig{
 		projectID: {
-			{SubscriptionTier: models.SKUAgentspaceBusiness, Location: models.LocationGlobal, Groups: []string{group}},
+			{SubscriptionTier: models.SKUGeminiBusiness, Location: models.LocationGlobal, Groups: []string{group}},
 		},
 	})
 
@@ -494,10 +494,13 @@ func TestJoinerService_Run_LicensePoolExhausted_TrimsAndSoftFails(t *testing.T) 
 	gemini.On("FetchLicenseUsageStats", mock.Anything, projectNumber, models.LocationGlobal).
 		Return(map[string]int64{configPath: 48}, nil)
 
-	// Trimmed retry with exactly 2 users.
+	// 1-by-1 retry: 2 users succeed, 3rd user hits exhaustion and breaks loop.
 	gemini.On("BatchUpdateUserLicenses", mock.Anything, projectID, models.LocationGlobal, mock.MatchedBy(func(updates []models.LicenseUpdate) bool {
-		return len(updates) == 2
-	})).Return(nil).Once()
+		return len(updates) == 1
+	})).Return(nil).Times(2)
+	gemini.On("BatchUpdateUserLicenses", mock.Anything, projectID, models.LocationGlobal, mock.MatchedBy(func(updates []models.LicenseUpdate) bool {
+		return len(updates) == 1
+	})).Return(models.ErrLicensesExhausted).Once()
 
 	cfg := newJoinerConfig(map[string]config.ProjectConfig{
 		projectID: {
@@ -552,6 +555,11 @@ func TestJoinerService_Run_LicensePoolFullyExhausted_AllSoftFailed(t *testing.T)
 	gemini.On("FetchLicenseUsageStats", mock.Anything, projectNumber, models.LocationGlobal).
 		Return(map[string]int64{configPath: 50}, nil)
 
+	// 1-by-1 retry: first user immediately hits exhaustion and breaks loop.
+	gemini.On("BatchUpdateUserLicenses", mock.Anything, projectID, models.LocationGlobal, mock.MatchedBy(func(updates []models.LicenseUpdate) bool {
+		return len(updates) == 1
+	})).Return(models.ErrLicensesExhausted).Once()
+
 	cfg := newJoinerConfig(map[string]config.ProjectConfig{
 		projectID: {
 			{SubscriptionTier: models.SKUEnterprise, Location: models.LocationGlobal, Groups: []string{group}},
@@ -565,8 +573,8 @@ func TestJoinerService_Run_LicensePoolFullyExhausted_AllSoftFailed(t *testing.T)
 	assert.Equal(t, 0, resp.LicensesGranted)
 	assert.Equal(t, 2, resp.LicensesSoftFailed)
 
-	// No trimmed retry should have been issued.
-	gemini.AssertNumberOfCalls(t, "BatchUpdateUserLicenses", 1)
+	// 1 initial batch call + 1 single-user retry call that hit exhaustion.
+	gemini.AssertNumberOfCalls(t, "BatchUpdateUserLicenses", 2)
 	gemini.AssertExpectations(t)
 	rm.AssertExpectations(t)
 }
@@ -708,10 +716,13 @@ func TestJoinerService_Run_TwoPools_FirstExhausted_SpillsToSecond(t *testing.T) 
 	gemini.On("FetchLicenseUsageStats", mock.Anything, projectNumber, models.LocationGlobal).
 		Return(map[string]int64{pathPoolA: 0}, nil)
 
-	// Trimmed retry: 2 users against pool A → success.
+	// 1-by-1 retry against pool A: 2 users succeed, 3rd user hits exhaustion and breaks loop.
 	gemini.On("BatchUpdateUserLicenses", mock.Anything, projectID, models.LocationGlobal, mock.MatchedBy(func(updates []models.LicenseUpdate) bool {
-		return len(updates) == 2 && updates[0].LicenseConfigPath == pathPoolA
-	})).Return(nil).Once()
+		return len(updates) == 1 && updates[0].LicenseConfigPath == pathPoolA
+	})).Return(nil).Times(2)
+	gemini.On("BatchUpdateUserLicenses", mock.Anything, projectID, models.LocationGlobal, mock.MatchedBy(func(updates []models.LicenseUpdate) bool {
+		return len(updates) == 1 && updates[0].LicenseConfigPath == pathPoolA
+	})).Return(models.ErrLicensesExhausted).Once()
 
 	// Spill: remaining 2 users against pool B → success.
 	gemini.On("BatchUpdateUserLicenses", mock.Anything, projectID, models.LocationGlobal, mock.MatchedBy(func(updates []models.LicenseUpdate) bool {
@@ -779,6 +790,11 @@ func TestJoinerService_Run_TwoPools_BothExhausted_AllSoftFailed(t *testing.T) {
 	gemini.On("FetchLicenseUsageStats", mock.Anything, projectNumber, models.LocationGlobal).
 		Return(map[string]int64{pathPoolA: 5}, nil).Once()
 
+	// 1-by-1 retry against pool A: hits exhaustion immediately.
+	gemini.On("BatchUpdateUserLicenses", mock.Anything, projectID, models.LocationGlobal, mock.MatchedBy(func(updates []models.LicenseUpdate) bool {
+		return len(updates) == 1 && updates[0].LicenseConfigPath == pathPoolA
+	})).Return(models.ErrLicensesExhausted).Once()
+
 	// Spill: all 3 against pool B → exhausted (pool full: 5/5).
 	gemini.On("BatchUpdateUserLicenses", mock.Anything, projectID, models.LocationGlobal, mock.MatchedBy(func(updates []models.LicenseUpdate) bool {
 		return len(updates) == 3 && updates[0].LicenseConfigPath == pathPoolB
@@ -787,6 +803,11 @@ func TestJoinerService_Run_TwoPools_BothExhausted_AllSoftFailed(t *testing.T) {
 	// Usage stats for pool B: 5 used → 0 available.
 	gemini.On("FetchLicenseUsageStats", mock.Anything, projectNumber, models.LocationGlobal).
 		Return(map[string]int64{pathPoolB: 5}, nil).Once()
+
+	// 1-by-1 retry against pool B: hits exhaustion immediately.
+	gemini.On("BatchUpdateUserLicenses", mock.Anything, projectID, models.LocationGlobal, mock.MatchedBy(func(updates []models.LicenseUpdate) bool {
+		return len(updates) == 1 && updates[0].LicenseConfigPath == pathPoolB
+	})).Return(models.ErrLicensesExhausted).Once()
 
 	cfg := newJoinerConfig(map[string]config.ProjectConfig{
 		projectID: {
@@ -830,7 +851,7 @@ func TestJoinerService_collectGroupMembers_PageLimitReached(t *testing.T) {
 	svc := NewJoinerService(idp, gemini, new(MockResourceManagerClient))
 	userBestEntitlement := make(map[string]userEntitlement)
 
-	err := svc.collectGroupMembers(ctx, groupEmail, models.SKUAgentspaceBusiness, "", models.LocationGlobal, userBestEntitlement, false)
+	err := svc.collectGroupMembers(ctx, groupEmail, models.SKUGeminiBusiness, "", models.LocationGlobal, userBestEntitlement, false)
 
 	require.NoError(t, err)
 	idp.AssertNumberOfCalls(t, "ListMembers", models.MaxPagesPerGroup)
@@ -912,7 +933,7 @@ func TestJoinerService_Run_DirectLaw_MissingSubscriptionInIndex(t *testing.T) {
 		projectID = "proj-missing-dl"
 		group     = "direct-grp@example.com"
 		userEmail = "user-dl@example.com"
-		subID     = "non-existent-sub-id"
+		subID     = "nonexistent-sub-id"
 	)
 
 	// Empty index - no matching subscriptions

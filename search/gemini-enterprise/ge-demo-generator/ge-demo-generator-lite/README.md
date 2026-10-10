@@ -1,4 +1,4 @@
-# GE Demo Generator Lite
+# Gemini Enterprise Demo Generator Lite
 
 A standalone Google Apps Script web app that generates Google Workspace demo data
 (Docs, Sheets, Slides, optional Office/PDF exports, and AI-generated images) directly
@@ -7,7 +7,7 @@ with a per-demo Guide Doc. Built for Gemini Enterprise Business Edition (GEBE), 
 does not support custom ADK agents — and works seamlessly with Gemini Enterprise
 Standard and Plus editions as well.
 
-This is a **separate GAS project** that lives as a subdirectory of the GE Demo Generator
+This is a **separate GAS project** that lives as a subdirectory of the Gemini Enterprise Demo Generator
 repo (same pattern as `experimental/mcp-importer/`). It has its own `scriptId` and
 deployment; the root project's `clasp push` does not include it.
 
@@ -35,7 +35,7 @@ deployment; the root project's `clasp push` does not include it.
    not the repo root one).
 3. Set Script Properties via the editor: run `initializeProject(projectId)` — or set
    `PROJECT_ID` manually. Optional: `LOCATION` (default `global`), `MODEL`
-   (default `gemini-3.6-flash`).
+   (default `gemini-3.8-flash`).
 4. Deploy as a Web App with **Execute as: User accessing the web app** and **Access: anyone
    in your domain** (matches `appsscript.json`).
 5. Each user grants Drive/Docs/Sheets/Slides + Vertex AI Agent Platform consent on first open, and needs

@@ -49,6 +49,28 @@ def _patched_default(self, obj):
     return _orig_default(self, obj)
 json.JSONEncoder.default = _patched_default
 
+_TOK_LABELS = {}
+
+def _tok_fp(_t):
+    # Never log token material. The auth diagnostics only need to tell one
+    # token from another across log lines (stale snapshot vs freshly rotated),
+    # which a prefix did by leaking the first 30 characters of a live OAuth
+    # access token into Cloud Logging. Hand out sequential in-process labels
+    # instead: nothing derived from the secret is emitted, so there is no
+    # digest to brute-force and no value to correlate across deployments.
+    # The table is bounded because a long-lived instance rotates tokens.
+    try:
+        _k = _t or ''
+        _lbl = _TOK_LABELS.get(_k)
+        if _lbl is None:
+            if len(_TOK_LABELS) >= 64:
+                _TOK_LABELS.clear()
+            _lbl = 'tok%d' % (len(_TOK_LABELS) + 1)
+            _TOK_LABELS[_k] = _lbl
+        return _lbl
+    except Exception:
+        return 'unavailable'
+
 
 
 
@@ -299,18 +321,43 @@ def get_bigquery_mcp_url():
     # Using ?project= query parameter as the header alone was insufficient for public datasets
     return f"https://bigquery.googleapis.com/mcp?project={project_id}"
 
+# The BigQuery MCP server offers six tools. Three of them are a behavioural
+# hazard, not a token one: a 12-run A/B of the generated agent on 2026-08-23
+# had it open a plain figure question with 'list_table_ids' before its first
+# useful call, twice - a whole model round trip (~7s) spent rediscovering
+# table names the generated data-asset catalog already lists in the prompt.
+# A tool that is not declared cannot be the opening move, and after this
+# filter the listing calls stopped entirely.
+#
+# Do not sell this as a prompt-size win. Measured as sent to the model, the
+# three dropped declarations are 2,046 characters of a 421,269-character
+# prefill; the raw MCP listing is far larger, but ADK strips it down before
+# it ships. The same A/B saw no change in end-to-end latency: a turn costs
+# 4-10 sequential model round trips and this removes at most one of them.
+#
+# What survives, and why:
+#   execute_sql_readonly  every read.
+#   execute_sql           writes - INSERT/UPDATE/DELETE/MERGE have no other path.
+#   get_table_info        SQL error recovery; five places in the instruction
+#                         send the model here when a query fails on a column.
+_BIGQUERY_TOOL_FILTER = ['execute_sql', 'execute_sql_readonly', 'get_table_info']
+
+
 def get_bigquery_mcp_toolset():
     """Creates a BigQuery MCP toolset. URL is project-scoped to ensure quota/perms."""
     project_id = get_project_id()
     url = get_bigquery_mcp_url()
     if project_id == "UNKNOWN":
         print("  [CRITICAL] GOOGLE_CLOUD_PROJECT is missing! MCP calls will likely fail.")
-        
+
+    # Escape hatch for a demo whose data-asset catalog does not describe
+    # everything the agent needs to discover at runtime.
+    _filter = None if os.environ.get("BQ_TOOL_FILTER_OFF", "").lower() in ("1", "true", "yes") else _BIGQUERY_TOOL_FILTER
     return McpToolset(connection_params=StreamableHTTPConnectionParams(
-        url=url, 
+        url=url,
         headers={"x-goog-user-project": project_id},
         timeout=300
-    ))
+    ), tool_filter=_filter)
 
 def get_firestore_mcp_toolset():
     """Creates a Firestore MCP toolset (data ops only; DB/index admin excluded
@@ -324,13 +371,21 @@ def get_firestore_mcp_toolset():
         timeout=300
     ), tool_filter=[
         'get_document', 'add_document', 'update_document', 'delete_document',
-        'list_documents', 'list_collections',
+        'list_documents',
+        # list_collections is deliberately withheld. It returns project-wide
+        # metadata that bloats the context and reliably triggers
+        # MALFORMED_FUNCTION_CALL, and there is exactly one collection in this
+        # demo, whose name is already in the instruction. The prompt has told the
+        # model not to call it since v10.x and the model called it anyway on
+        # 2026-08-23; removing it from the toolset is the only thing that works.
     ])
 
 def get_maps_mcp_toolset():
     """Creates a Google Maps MCP toolset."""
     dotenv.load_dotenv()
     maps_api_key = os.getenv('MAPS_API_KEY')
+    if not maps_api_key:
+        return None
     project_id = get_project_id()
     url = get_maps_mcp_url()
     return McpToolset(connection_params=StreamableHTTPConnectionParams(
@@ -464,7 +519,7 @@ if os.environ.get("ENABLE_WORKSPACE_MCP") == "1" or os.environ.get("ENABLE_WORKS
                     t = getattr(builtins, '_ws_session_tokens', {}).get(_sid)
                     if t:
                         token = t
-                        _logger.warning(f"header_provider: OK Strategy0 - per-session registry (session={_sid}, prefix={token[:30]}..., len={len(token)})")
+                        _logger.warning(f"header_provider: OK Strategy0 - per-session registry (session={_sid}, fp={_tok_fp(token)}, len={len(token)})")
             except Exception as ex:
                 _logger.warning(f"header_provider: Strategy0 ERROR - registry lookup failed: {type(ex).__name__}: {ex}")
 
@@ -474,7 +529,7 @@ if os.environ.get("ENABLE_WORKSPACE_MCP") == "1" or os.environ.get("ENABLE_WORKS
             t = getattr(builtins, '_workspace_oauth_token', '')
             if t:
                 token = t
-                _logger.warning(f"header_provider: OK Strategy1 - token from builtins (prefix={token[:30]}..., len={len(token)})")
+                _logger.warning(f"header_provider: OK Strategy1 - token from builtins (fp={_tok_fp(token)}, len={len(token)})")
 
         # Strategy 2 (was 1): context.state - CREATE-time snapshot, may be stale.
         if not token and context and auth_id:
@@ -487,7 +542,7 @@ if os.environ.get("ENABLE_WORKSPACE_MCP") == "1" or os.environ.get("ENABLE_WORKS
                         t = state[auth_id] if auth_id in state else None
                     if t:
                         token = t
-                        _logger.warning(f"header_provider: OK Strategy2 - token from context.state (prefix={token[:30]}..., len={len(token)}) - CREATE-time snapshot, may be stale")
+                        _logger.warning(f"header_provider: OK Strategy2 - token from context.state (fp={_tok_fp(token)}, len={len(token)}) - CREATE-time snapshot, may be stale")
                     else:
                         _logger.warning(f"header_provider: Strategy2 MISS - context.state exists (type={type(state).__name__}) but auth_id '{auth_id}' not found. keys={list(state.keys()) if hasattr(state, 'keys') else 'N/A'}")
             except Exception as ex:
@@ -505,7 +560,7 @@ if os.environ.get("ENABLE_WORKSPACE_MCP") == "1" or os.environ.get("ENABLE_WORKS
                             t = session_state[auth_id] if auth_id in session_state else None
                         if t:
                             token = t
-                            _logger.warning(f"header_provider: OK Strategy3 - token from context.session.state (prefix={token[:30]}..., len={len(token)}) - CREATE-time snapshot, may be stale")
+                            _logger.warning(f"header_provider: OK Strategy3 - token from context.session.state (fp={_tok_fp(token)}, len={len(token)}) - CREATE-time snapshot, may be stale")
             except Exception as ex:
                 _logger.warning(f"header_provider: Strategy3 ERROR - context.session.state access failed: {type(ex).__name__}: {ex}")
 
@@ -600,7 +655,7 @@ if os.environ.get("ENABLE_WORKSPACE_MCP") == "1":
                     t = getattr(builtins, '_ws_session_tokens', {}).get(_sid)
                     if t:
                         token = t
-                        _logger.warning(f"header_provider: OK Strategy0 - per-session registry (session={_sid}, prefix={token[:30]}..., len={len(token)})")
+                        _logger.warning(f"header_provider: OK Strategy0 - per-session registry (session={_sid}, fp={_tok_fp(token)}, len={len(token)})")
             except Exception as ex:
                 _logger.warning(f"header_provider: Strategy0 ERROR - registry lookup failed: {type(ex).__name__}: {ex}")
 
@@ -610,7 +665,7 @@ if os.environ.get("ENABLE_WORKSPACE_MCP") == "1":
             t = getattr(builtins, '_workspace_oauth_token', '')
             if t:
                 token = t
-                _logger.warning(f"header_provider: OK Strategy1 - token from builtins (prefix={token[:30]}..., len={len(token)})")
+                _logger.warning(f"header_provider: OK Strategy1 - token from builtins (fp={_tok_fp(token)}, len={len(token)})")
 
         # Strategy 2 (was 1): context.state - CREATE-time snapshot, may be stale.
         if not token and context and auth_id:
@@ -623,7 +678,7 @@ if os.environ.get("ENABLE_WORKSPACE_MCP") == "1":
                         t = state[auth_id] if auth_id in state else None
                     if t:
                         token = t
-                        _logger.warning(f"header_provider: OK Strategy2 - token from context.state (prefix={token[:30]}..., len={len(token)}) - CREATE-time snapshot, may be stale")
+                        _logger.warning(f"header_provider: OK Strategy2 - token from context.state (fp={_tok_fp(token)}, len={len(token)}) - CREATE-time snapshot, may be stale")
                     else:
                         _logger.warning(f"header_provider: Strategy2 MISS - context.state exists (type={type(state).__name__}) but auth_id '{auth_id}' not found. keys={list(state.keys()) if hasattr(state, 'keys') else 'N/A'}")
             except Exception as ex:
@@ -641,7 +696,7 @@ if os.environ.get("ENABLE_WORKSPACE_MCP") == "1":
                             t = session_state[auth_id] if auth_id in session_state else None
                         if t:
                             token = t
-                            _logger.warning(f"header_provider: OK Strategy3 - token from context.session.state (prefix={token[:30]}..., len={len(token)}) - CREATE-time snapshot, may be stale")
+                            _logger.warning(f"header_provider: OK Strategy3 - token from context.session.state (fp={_tok_fp(token)}, len={len(token)}) - CREATE-time snapshot, may be stale")
             except Exception as ex:
                 _logger.warning(f"header_provider: Strategy3 ERROR - context.session.state access failed: {type(ex).__name__}: {ex}")
 
@@ -736,7 +791,7 @@ if os.environ.get("ENABLE_WORKSPACE_MCP") == "1":
                 auth_header = headers.get("Authorization", "")
                 if auth_header.startswith("Bearer "):
                     token = auth_header[7:]
-                    _logger.warning(f"httpx_factory: Got token from headers (prefix={token[:30]}..., len={len(token)})")
+                    _logger.warning(f"httpx_factory: Got token from headers (fp={_tok_fp(token)}, len={len(token)})")
         
             if not token:
                 _logger.warning("httpx_factory: No token in headers, using default client")
@@ -931,9 +986,8 @@ async def generate_image(prompt: str, tool_context: ToolContext) -> dict:
     
     Args:
         prompt: A highly detailed, descriptive prompt for the image. Include stylistic instructions (e.g., 'photorealistic', 'flat design').
-                CRITICAL: The prompt text MUST be written in the EXACT SAME language that the user is using in the current chat session.
-                If the conversation is in Japanese, you MUST write the entire prompt in Japanese (e.g., '武田電気株式会社の見積状況をまとめたスライド...').
-                This ensures all text inside the generated image is rendered in the user's language.
+                CRITICAL: The prompt text MUST be written in the EXACT SAME language that the user is using in the current chat session,
+                whatever that language is. This ensures all text inside the generated image is rendered in the user's language.
         
     Returns:
         A dictionary with status and detail keys.
@@ -942,36 +996,31 @@ async def generate_image(prompt: str, tool_context: ToolContext) -> dict:
     
     import os
     import logging
-    import re
     location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
     project = os.environ.get("GOOGLE_CLOUD_PROJECT")
     
     logging.info(f"generate_image called with prompt: {prompt}")
     logging.info(f"Using location: {location}, project: {project}")
     
-    # 1. Automatic language detection on the prompt text (Detect Japanese characters)
-    is_japanese = bool(re.search(r'[぀-ゟ゠-ヿ一-龯]', prompt))
+    # Construct robust system-level style and language guidelines.
+    base_style_rule = (
+        "\n\nCRITICAL STYLE RULE: NEVER add headers, watermarks, logos, or invented "
+        "company, brand or organisation names to the generated image. Image models like "
+        "to stamp generic corporate boilerplate onto slides; render only the text the "
+        "prompt above actually asks for."
+    )
     
-    # 2. Construct robust system-level style and language guidelines based on detected language
-    base_style_rule = "\n\nCRITICAL STYLE RULE: NEVER include headers, watermarks, logos, or any text reading 'Consulting Firm' in the generated image."
+    # One rule for every language. Naming a language here would tilt every demo
+    # that is not in that language, and the model already knows which script the
+    # prompt is written in.
+    lang_rule = (
+        "\n\nCRITICAL LANGUAGE RULE: ALL text elements inside the generated image "
+        "(including presentation titles, headers, table labels, chart legends, data points, bullet points, annotations, captions, and company names) "
+        "MUST be rendered EXCLUSIVELY in the SAME language and script as the prompt text above. "
+        "Do NOT translate anything into English, do NOT transliterate names into Latin characters, "
+        "and do NOT mix languages. This is a strict requirement."
+    )
     
-    if is_japanese:
-        # Heavy reinforcement for Japanese rendering (Forces Imagen 3 to use Japanese fonts and text labels exclusively)
-        lang_rule = (
-            "\n\nCRITICAL LANGUAGE RULE: ALL text elements inside the generated image "
-            "(including presentation titles, headers, table labels, chart legends, data points, bullet points, annotations, and company names) "
-            "MUST be rendered EXCLUSIVELY in Japanese. Do NOT use any English or Latin characters. "
-            "For example, render company names as '武田電気株式会社' (not Takeden Co), "
-            "and use Japanese for headers like 'エグゼクティブサマリー' or '保留中の見積処理状況'. "
-            "This is a strict requirement."
-        )
-    else:
-        lang_rule = (
-            "\n\nCRITICAL LANGUAGE RULE: ALL text elements inside the generated image "
-            "(including titles, labels, axis names, legends, bullet points, annotations, captions) "
-            "MUST be rendered in the SAME language as the prompt text above. Do NOT mix languages."
-        )
-        
     final_prompt = prompt + base_style_rule + lang_rule
     
     client = genai_client.Client(
@@ -1188,7 +1237,7 @@ async def publish_dashboard(html: str, title: str, tool_context: ToolContext) ->
 if os.environ.get("ENABLE_COMPUTER_USE") == "1":
 
     # =====================================================================
-    # Computer Use (browser agent) -- Gemini 3.5 Flash built-in computer_use
+    # Computer Use (browser agent) -- Gemini 3.8 Flash built-in computer_use
     # tool driven over a self-hosted headless Chromium (Playwright). Adapted
     # from the official reference impl (github.com/google-gemini/
     # computer-use-preview, Apache-2.0): same generate_content loop, action
@@ -1521,9 +1570,11 @@ if os.environ.get("ENABLE_COMPUTER_USE") == "1":
             return {"status": "error", "detail": "Playwright is not installed in this environment: " + str(_imp)}
 
         client = genai_client.Client(vertexai=True, location=location, project=project)
-        # Pinned to gemini-3.5-flash: gemini-3.6-flash does not support the
-        # Computer Use tool, so this must NOT follow AGENT_MODEL.
-        model = os.environ.get("COMPUTER_USE_MODEL", "gemini-3.5-flash")
+        # gemini-3.8-flash supports the Computer Use tool (3.6-flash did not,
+        # which is why this used to be pinned to 3.5-flash). Kept on its own
+        # COMPUTER_USE_MODEL override rather than AGENT_MODEL, since a custom
+        # --model-analysis-agent may point at a model without Computer Use.
+        model = os.environ.get("COMPUTER_USE_MODEL", "gemini-3.8-flash")
         cfg = types.GenerateContentConfig(
             temperature=1.0, top_p=0.95, top_k=40, max_output_tokens=8192,
             tools=[types.Tool(computer_use=types.ComputerUse(environment=types.Environment.ENVIRONMENT_BROWSER))],
@@ -2347,7 +2398,11 @@ def get_task_result(task_id: str, tool_context: ToolContext) -> dict:
             _attach = globals().get("_ma_attach_live_deliverables")
             if _attach is not None:
                 try:
-                    _attach(_res, task_id, "result_summary")
+                    # deliver_tid, not task_id: an upload-only follow-up writes
+                    # into the ORIGINAL ticket's storage prefix, so a status
+                    # check on the follow-up must look there or it reports a
+                    # finished upload with no links (v11.62).
+                    _attach(_res, _d.get("deliver_tid") or task_id, "result_summary")
                 except Exception:
                     pass  # status reporting must never fail on link refresh
         return _res
@@ -4056,13 +4111,33 @@ if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
                     "When telling the user about progress, lead with elapsed_minutes and the latest "
                     "concrete activity from recent_activity; never phrase the percentage as "
                     "'almost done'.")
+                # Files can reach storage well before the run ends - an upload-only
+                # follow-up in particular finishes its uploads and then spends
+                # minutes tidying up. Surfacing them mid-run is what the user asked
+                # for when they asked about the task at all (v11.62).
+                try:
+                    _wip_links = _ma_collect_deliverables(_d.get("deliver_tid") or task_id)
+                except Exception:
+                    _wip_links = []
+                if _wip_links:
+                    _out["deliverable_downloads"] = _wip_links
+                    _out["_MANDATORY_ACTION"] = (
+                        "The task is STILL RUNNING - say so - but files it produced are ALREADY in "
+                        "storage. Your response MUST list EVERY link in deliverable_downloads, verbatim, "
+                        "as markdown links under a short heading meaning 'Deliverables' in the "
+                        "conversation language. The user cannot see this tool result; a link you do not "
+                        "copy does not exist for them. More files may follow when the task completes.")
             if _d.get("status") in ("completed", "failed"):
                 _out["report"] = _d.get("result_summary", "")
                 _out["_MANDATORY_ACTION"] = ("Present the report as formatted markdown text, verbatim, "
                                              "including any deliverable download links.")
                 if _d.get("status") == "completed":
                     try:
-                        _ma_attach_live_deliverables(_out, task_id, "report")
+                        # deliver_tid, not task_id (v11.62): see the same call in
+                        # get_task_status. An upload-only follow-up delegated with
+                        # deliverables_for_task_id uploads into the ORIGINAL
+                        # ticket's prefix, and the user asks about the FOLLOW-UP.
+                        _ma_attach_live_deliverables(_out, _d.get("deliver_tid") or task_id, "report")
                     except Exception:
                         pass  # status reporting must never fail on link refresh
             return _out
@@ -4447,3 +4522,170 @@ if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
             if _errors:
                 _out["problems"] = _errors
             return _out
+
+
+# DataStore ids that DATASTORE_SCOPE_IDS names but the engine does not actually
+# carry. The engine rejects the WHOLE search with a 400 if the scope mentions one
+# of these, so the first such rejection records the offender here and every later
+# call skips it. Populated at most once per process.
+_DATASTORE_SCOPE_DROPPED = set()
+
+
+def search_datastore(
+    query: str,
+    datastore_id: str = "",
+    filter_expr: str = "",
+    page_size: int = 5,
+    tool_context: ToolContext = None
+) -> dict:
+    """FAST PATH. One sub-second call against a single Discovery Engine index built over
+    BOTH the enterprise documents (PDF, Excel, Word, scanned images, manuals, reports) AND
+    the transaction tables. Prefer this over the catalog-then-SQL route, which costs four
+    to five model round trips before the user sees anything.
+
+    USE WHEN: looking something up by name, id or keyword; "what do we have on X" / "tell me
+    about X"; finding the manual, spec or report that covers Y; profiling ONE named record
+    (a store, a customer, a campaign, a part) from its own stored fields; the opening
+    exploratory question of a conversation - anything a person would answer by searching
+    rather than by calculating.
+
+    DO NOT USE WHEN: the answer is DERIVED - an aggregate over many rows (sum, count,
+    average, ranking, trend, share, variance), a join across tables, or anything you have to
+    compute. Use execute_sql for those. Also use execute_sql for any record created or
+    changed during this conversation: this index LAGS the tables. It cannot write anything.
+
+    Args:
+        query: Natural language query (e.g. "trunk route detour procedure", "Q3 audit discrepancies").
+        datastore_id: Optional specific DataStore ID to search. If omitted, searches this
+            demo's own DataStores on the Gemini Enterprise engine.
+        filter_expr: Optional filter expression (e.g., 'category: ANY("audit", "finance")').
+        page_size: Maximum number of search results to return (default: 5).
+
+    Returns:
+        dict containing search results, extractive answers, snippet text, and document reference links.
+    """
+    import os, re, json, urllib.request, urllib.error
+    import google.auth
+    from google.auth.transport.requests import Request
+
+    _project_id = os.environ.get("PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+    _location = os.environ.get("DATASTORE_LOCATION", "global")
+    _target_ds = datastore_id or os.environ.get("DEFAULT_DATASTORE_ID", "")
+
+    if not _project_id:
+        return {"status": "error", "message": "PROJECT_ID environment variable not set."}
+
+    _ep = "discoveryengine.googleapis.com" if _location == "global" else f"{_location}-discoveryengine.googleapis.com"
+    _collection = f"projects/{_project_id}/locations/{_location}/collections/default_collection"
+
+    # DATASTORE_SCOPE_IDS confines the engine-wide search to the DataStores this
+    # deployment created. A Gemini Enterprise app is routinely shared by several
+    # demos, and unscoped the engine ranks by relevance across ALL of them - a
+    # generic query like "gold tier customers" then answers out of a NEIGHBOURING
+    # demo's customer table, which reads as this demo returning wrong data. Left
+    # unset the behaviour is the old engine-wide search, so an app whose extra
+    # DataStores are deliberate keeps working.
+    _scope_ids = []
+    if _target_ds:
+        _search_url = f"https://{_ep}/v1alpha/{_collection}/dataStores/{_target_ds}/servingConfigs/default_search:search"
+    else:
+        _app_id = os.environ.get("GEMINI_ENTERPRISE_APP_ID", "")
+        if _app_id:
+            _search_url = f"https://{_ep}/v1alpha/{_collection}/engines/{_app_id}/servingConfigs/default_search:search"
+            _scope_ids = [
+                _s.strip() for _s in os.environ.get("DATASTORE_SCOPE_IDS", "").split(",")
+                if _s.strip() and _s.strip() not in _DATASTORE_SCOPE_DROPPED
+            ]
+        else:
+            return {"status": "error", "message": "No datastore_id provided and neither DEFAULT_DATASTORE_ID nor GEMINI_ENTERPRISE_APP_ID is configured."}
+
+    try:
+        _creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        _creds.refresh(Request())
+        _token = _creds.token
+    except Exception as _auth_err:
+        return {"status": "error", "message": f"Failed to acquire Google Cloud auth token: {str(_auth_err)}"}
+
+    _payload = {
+        "query": query,
+        "pageSize": max(1, min(page_size, 10)),
+        "contentSearchSpec": {
+            "snippetSpec": {"returnSnippet": True},
+            "summarySpec": {"summaryResultCount": 3, "includeCitations": True},
+            "extractiveContentSpec": {"maxExtractiveAnswerCount": 1, "maxExtractiveSegmentCount": 2}
+        }
+    }
+    if filter_expr:
+        _payload["filter"] = filter_expr
+    if _scope_ids:
+        _payload["dataStoreSpecs"] = [{"dataStore": f"{_collection}/dataStores/{_i}"} for _i in _scope_ids]
+
+    def _post(_body):
+        _req = urllib.request.Request(
+            _search_url,
+            data=json.dumps(_body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {_token}",
+                "Content-Type": "application/json; charset=utf-8"
+            },
+            method="POST"
+        )
+        with urllib.request.urlopen(_req, timeout=30) as _resp:
+            return json.loads(_resp.read().decode("utf-8"))
+
+    try:
+        try:
+            _resp_data = _post(_payload)
+        except urllib.error.HTTPError as _scope_err:
+            # A DataStore named in the scope that is not attached to the engine
+            # fails the entire request. Remember which ones, so this costs one
+            # extra round trip once rather than on every search, and retry with
+            # what is left - unscoped if nothing is.
+            if _scope_err.code != 400 or not _scope_ids:
+                raise
+            _body_txt = _scope_err.read().decode("utf-8", errors="replace")
+            if "data_store_specs" not in _body_txt:
+                raise
+            _bad = set(re.findall(r"dataStores/([A-Za-z0-9_-]+)", _body_txt))
+            if not _bad:
+                raise
+            _DATASTORE_SCOPE_DROPPED.update(_bad)
+            _scope_ids = [_i for _i in _scope_ids if _i not in _bad]
+            if _scope_ids:
+                _payload["dataStoreSpecs"] = [{"dataStore": f"{_collection}/dataStores/{_i}"} for _i in _scope_ids]
+            else:
+                _payload.pop("dataStoreSpecs", None)
+            _resp_data = _post(_payload)
+
+        _results = []
+        for item in _resp_data.get("results", []):
+            _doc = item.get("document", {})
+            _struct_data = _doc.get("structData", {})
+            _derived = _doc.get("derivedStructData", {})
+            _snippets = [s.get("snippet", "") for s in _derived.get("snippets", []) if s.get("snippet")]
+            _extractive_answers = [a.get("content", "") for a in _derived.get("extractive_answers", []) if a.get("content")]
+            _extractive_segments = [s.get("content", "") for s in _derived.get("extractive_segments", []) if s.get("content")]
+            _title = _derived.get("title", "") or _struct_data.get("title", "") or _doc.get("name", "").split("/")[-1]
+            _link = _derived.get("link", "") or _struct_data.get("link", "") or _doc.get("name", "")
+            _results.append({
+                "title": _title,
+                "link": _link,
+                "snippets": _snippets,
+                "extractive_answers": _extractive_answers,
+                "extractive_segments": _extractive_segments,
+                "data": _struct_data
+            })
+        _summary = _resp_data.get("summary", {}).get("summaryText", "")
+        return {
+            "status": "success",
+            "query": query,
+            "total_size": _resp_data.get("totalSize", len(_results)),
+            "summary": _summary,
+            "results": _results
+        }
+    except urllib.error.HTTPError as _http_err:
+        _err_body = _http_err.read().decode("utf-8", errors="replace")
+        return {"status": "error", "code": _http_err.code, "message": f"Discovery Engine Search API error: {_err_body[:300]}"}
+    except Exception as _e:
+        return {"status": "error", "message": f"Search failed: {str(_e)}"}
+

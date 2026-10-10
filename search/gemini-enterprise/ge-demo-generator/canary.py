@@ -11,7 +11,6 @@ customer-facing demo build.
 It writes a directory that mirrors what the setup script emits:
 
     requirements.txt          from PINNED_DEPS in app/Code.gs, per variant
-    constraints.txt           caps only, mirroring the Code.gs generator
     dep_smoke_test.py         the __DEP_SMOKE_EOF__ heredoc, verbatim
     adk_agent/app/imports.py  every import statement in the agent template,
                               try/except context preserved
@@ -47,14 +46,26 @@ HERE = Path(__file__).parent
 CODE_GS = HERE / "app" / "Code.gs"
 AGENT_SRC = HERE / "agent_template" / "adk_agent"
 
-# Mirrors CONSTRAINT_KEYS in app/Code.gs. Kept in the same order so the emitted
-# constraints.txt is byte-comparable with the generated one.
-CONSTRAINT_KEYS = [
-    "adk", "mcp", "genai", "a2a", "aiplatform", "storage", "scheduler",
-    "tasks", "pubsub", "firestore", "logging", "dotenv", "dbDtypes", "otel",
-    "playwright", "genaiComputerUse", "cuOtelGcpLogging",
-    "cuOtelGcpResourceDetector",
-]
+# The A2UI v0.9 wiring the generated agent depends on. A plain module import
+# cannot see a dropped symbol, and these four are exactly what agent.py and
+# fast_api_app.py build the schema manager and the DataPart from. Kept in sync
+# with the equivalent RUN line in the generated Dockerfile (Code.gs).
+A2UI_INTERFACE_CHECK = (
+    "from a2ui.schema.constants import VERSION_0_9; "
+    "from a2ui.schema.catalog import CatalogConfig; "
+    "from a2ui.schema.common_modifiers import remove_strict_validation; "
+    "from a2ui.a2a.parts import create_a2ui_part; "
+    "assert hasattr(CatalogConfig, 'from_path'), 'FAIL: CatalogConfig.from_path missing'; "
+    # Pin the MIME the DataPart actually carries, not just the signature.
+    # Gemini Enterprise renders 'application/json+a2ui' and ignores
+    # 'application/a2ui+json'; the SDK picks between them off the version
+    # kwarg, so a silent flip in that mapping turns every card into plain text
+    # with nothing else to see.
+    "_p = create_a2ui_part({'version': 'v0.9'}, version=VERSION_0_9); "
+    "_m = (_p.root.metadata or {}).get('mimeType'); "
+    "assert _m == 'application/json+a2ui', 'FAIL: unexpected A2UI mimeType ' + repr(_m); "
+    "print('a2ui v0.9 interface OK (mimeType=' + _m + ')')"
+)
 
 
 def heredoc(name, lines):
@@ -124,26 +135,6 @@ def requirements_for(values, variant):
     return [table[k] for k in order]
 
 
-def constraints_for(table):
-    """Caps only, deduplicated by name -- mirrors the Code.gs generator."""
-    lines, seen = [], set()
-    for key in CONSTRAINT_KEYS:
-        spec = table.get(key)
-        if not spec or " @ " in spec:
-            continue
-        match = re.match(r"^([A-Za-z0-9._-]+)(?:\[[^\]]*\])?(.*)$", spec)
-        if not match:
-            continue
-        name, rest = match.group(1), match.group(2) or ""
-        bounds = [p.strip() for p in rest.split(",")
-                  if p.strip().startswith("<") or p.strip().startswith("==")]
-        if not bounds or name in seen:
-            continue
-        seen.add(name)
-        lines.append(name + ",".join(bounds))
-    return lines
-
-
 def write_context(out, variant):
     text = CODE_GS.read_text(encoding="utf-8")
     lines = text.split("\n")
@@ -156,8 +147,6 @@ def write_context(out, variant):
 
     (out / "requirements.txt").write_text(
         "\n".join(requirements_for(pairs, variant)) + "\n", encoding="utf-8")
-    (out / "constraints.txt").write_text(
-        "\n".join(constraints_for(table)) + "\n", encoding="utf-8")
     (out / "dep_smoke_test.py").write_text(
         "\n".join(heredoc("__DEP_SMOKE_EOF__", lines)) + "\n", encoding="utf-8")
 
@@ -173,21 +162,13 @@ def write_context(out, variant):
         "COPY --from=" + table["uvImage"] + " /uv /uvx /bin/\n"
         "RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*\n"
         "WORKDIR /app\n"
-        "COPY requirements.txt constraints.txt ./\n"
+        "COPY requirements.txt ./\n"
         "RUN uv pip install --system -r requirements.txt\n"
-        # constraints.txt guards the cloned-MCP installs and nothing else
-        # exercises it. A duplicate package name or a stray extra makes the
-        # file a hard error, which would surface only on a customer's build
-        # of a demo that happens to clone an MCP server.
-        "RUN uv pip install --system --dry-run -c constraints.txt "
-        '"mcp>=1.24.0" > /dev/null && echo "constraints.txt OK"\n'
         "COPY . .\n"
         'RUN uv pip freeze | grep -iE "^(google-adk|a2ui|mcp|google-genai|a2a-sdk)"'
         " | tee /app/.dep-versions\n"
         "RUN python dep_smoke_test.py\n"
-        'RUN python -c "from a2ui.a2a.parts import create_a2ui_part; import inspect;'
-        " assert 'version' in inspect.signature(create_a2ui_part).parameters,"
-        " 'FAIL: a2ui version param missing'; print('a2ui interface OK')\"\n",
+        'RUN python -c "' + A2UI_INTERFACE_CHECK + '"\n',
         encoding="utf-8")
 
     # --run-venv drops a .venv into this directory; without this, a later
@@ -200,17 +181,24 @@ def write_context(out, variant):
     return hard, optional
 
 
-def run_venv(out, uv_version):
+def run_venv(out, uv_version, table=None):
     """Resolve and run the smoke test in a venv -- the Docker-free fast path."""
+    import os
     venv = out / ".venv"
     uv = ["uvx", "uv@" + uv_version]
+    # Canary deliberately ignores UV_EXCLUDE_NEWER so daily CI catches upstream
+    # PyPI breakages immediately, while user deployments remain protected by
+    # the verified cutoff timestamp.
+    clean_env = {k: v for k, v in os.environ.items() if k != "UV_EXCLUDE_NEWER"}
+    clean_env.pop("PYTHONPATH", None)
+    clean_env["PYTHONNOUSERSITE"] = "1"
     steps = [
         (uv + ["venv", "--python", "3.11", str(venv)], "create venv"),
         (uv + ["pip", "install", "--python", str(venv), "-q",
                "-r", str(out / "requirements.txt")], "install requirements"),
     ]
     for command, label in steps:
-        proc = subprocess.run(command, capture_output=True, text=True, timeout=1800)
+        proc = subprocess.run(command, env=clean_env, capture_output=True, text=True, timeout=1800)
         if proc.returncode != 0:
             print("canary: FAILED to " + label)
             print((proc.stderr or proc.stdout)[:4000])
@@ -222,22 +210,37 @@ def run_venv(out, uv_version):
          "import importlib.metadata as m;"
          "print('\\n'.join('  ' + p + ' ' + m.version(p) for p in "
          "['google-adk','mcp','google-genai','a2a-sdk','a2ui-agent-sdk']))"],
-        capture_output=True, text=True)
+        env=clean_env, capture_output=True, text=True)
     print("resolved:")
     print(versions.stdout.rstrip())
 
     failed = 0
     for command, label in (
         ([python, "dep_smoke_test.py"], "dependency import smoke test"),
-        ([python, "-c", "from a2ui.a2a.parts import create_a2ui_part; import inspect; "
-          "assert 'version' in inspect.signature(create_a2ui_part).parameters; "
-          "print('a2ui interface OK')"], "a2ui interface check"),
+        ([python, "-c", A2UI_INTERFACE_CHECK], "a2ui interface check"),
     ):
-        proc = subprocess.run(command, cwd=str(out), capture_output=True, text=True)
+        proc = subprocess.run(command, cwd=str(out), env=clean_env, capture_output=True, text=True)
         output = (proc.stdout + proc.stderr).strip()
         print("\n== " + label + " ==")
         print("\n".join(l for l in output.split("\n")
                         if "UserWarning" not in l and "check_feature_enabled" not in l))
+        if proc.returncode != 0:
+            failed = 1
+
+    if table:
+        fs_spec = table.get("firestore", "google-cloud-firestore>=2.16.0,<3.0.0")
+        ac_spec = table.get("apiCore", "google-api-core>=2.28.0,<2.35.0")
+        host_cmd = uv + [
+            "run", "--isolated", "--no-project", "--python", "3.11",
+            "--with", fs_spec, "--with", ac_spec,
+            "python", "-c",
+            "from google.cloud import firestore; import google.api_core; "
+            "assert hasattr(google.api_core, 'check_python_version'); "
+            "print('host uv run --isolated firestore + api_core OK')",
+        ]
+        proc = subprocess.run(host_cmd, cwd=str(out), env=clean_env, capture_output=True, text=True, timeout=600)
+        print("\n== host uv run --isolated check ==")
+        print((proc.stdout + proc.stderr).strip())
         if proc.returncode != 0:
             failed = 1
     return failed
@@ -256,7 +259,7 @@ def main():
         return 0
 
     table = dict(parse_pinned_deps(CODE_GS.read_text(encoding="utf-8")))
-    return run_venv(out, table.get("uvVersion", "0.11.17"))
+    return run_venv(out, table.get("uvVersion", "0.11.17"), table)
 
 
 if __name__ == "__main__":

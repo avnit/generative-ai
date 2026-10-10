@@ -34,18 +34,18 @@ import (
 // it enumerates group memberships, resolves the highest-precedence SKU each
 // user is entitled to, and grants the missing licenses in batches.
 type JoinerService struct {
-	idp    ports.IdpClient
-	gemini ports.GeminiClient
-	rm     ports.ResourceManagerClient
+	idp          ports.IdpClient
+	geminiClient ports.GeminiClient
+	rm           ports.ResourceManagerClient
 }
 
 // NewJoinerService constructs a JoinerService wired to the supplied port
 // implementations. Logging is provided per-request via middleware.LoggerFromContext.
-func NewJoinerService(idp ports.IdpClient, gemini ports.GeminiClient, rm ports.ResourceManagerClient) *JoinerService {
+func NewJoinerService(idp ports.IdpClient, geminiClient ports.GeminiClient, rm ports.ResourceManagerClient) *JoinerService {
 	return &JoinerService{
-		idp:    idp,
-		gemini: gemini,
-		rm:     rm,
+		idp:          idp,
+		geminiClient: geminiClient,
+		rm:           rm,
 	}
 }
 
@@ -73,7 +73,7 @@ func (s *JoinerService) Run(ctx context.Context, cfg *config.EntitlementConfig, 
 		directLaw = *req.DirectLaw
 	}
 
-	licenseIndex, err := s.gemini.FetchLicenseConfigIndex(ctx, cfg.BillingAccountID, directLaw)
+	licenseIndex, err := s.geminiClient.FetchLicenseConfigIndex(ctx, cfg.BillingAccountID, directLaw)
 	if err != nil {
 		return dto.SyncAddResponse{}, fmt.Errorf("fetching license config index: %w", err)
 	}
@@ -113,6 +113,15 @@ func (s *JoinerService) Run(ctx context.Context, cfg *config.EntitlementConfig, 
 		totalGranted += granted
 		totalSoftFailed += softFailed
 		totalGroups += groups
+		// verbose debug logging: Emitted per-project
+		logger.DebugContext(ctx, "project processed",
+			slog.String("project_id", projectID),
+			slog.Int("licenses_granted", granted),
+			slog.Int("licenses_soft_failed", softFailed),
+			slog.Int("groups_processed", groups),
+			slog.Bool("dry_run", dryRun),
+			slog.Bool("direct_law_mode", directLaw),
+		)
 	}
 
 	elapsed := time.Since(start).Milliseconds()
@@ -143,7 +152,7 @@ type userEntitlement struct {
 	SubscriptionID string // only used in direct_law join mode, admin-specifies the {uuid} in licenseConfigs/{uuid}
 }
 
-// processProject enumerates all configured groups for a single GCP project,
+// processProject enumerates all configured groups for a single Google Cloud project,
 // resolves the highest-precedence (SKU, location) per user, looks up the
 // licenseConfig entries from index, and issues the grant batches. Updates are
 // grouped by LicenseConfigKey (SKU + location) and then processed
@@ -210,13 +219,13 @@ func (s *JoinerService) processProject(ctx context.Context, projectID, projectNu
 
 		} else {
 			// Default behavior for each user is to index by SKU which holds a slice of one or many LicenseUpdates
-		// LicenseConfigPath will be resolved per-entry when building each chunk.
-		pendingByKey[key] = append(pendingByKey[key], models.LicenseUpdate{
-			UserEmail: email,
-			SKU:       ent.SKU,
-			Location:  ent.Location,
-			Action:    models.LicenseActionGrant,
-		})
+			// LicenseConfigPath will be resolved per-entry when building each chunk.
+			pendingByKey[key] = append(pendingByKey[key], models.LicenseUpdate{
+				UserEmail: email,
+				SKU:       ent.SKU,
+				Location:  ent.Location,
+				Action:    models.LicenseActionGrant,
+			})
 		}
 	}
 
@@ -268,14 +277,21 @@ func (s *JoinerService) grantBatch(ctx context.Context, projectID, projectNumber
 
 	location := batch[0].Location
 
-	if batchErr := s.gemini.BatchUpdateUserLicenses(ctx, projectID, location, batch); batchErr == nil {
+	if batchErr := s.geminiClient.BatchUpdateUserLicenses(ctx, projectID, location, batch); batchErr == nil {
+		// verbose debug logging: Emitted per batch
+		logger.DebugContext(ctx, "batch granted",
+			slog.String("project_id", projectID),
+			slog.Int("count", len(batch)),
+			slog.String("license_config_path", entry.Path),
+			slog.String("subscription_tier", string(batch[0].SKU)),
+		)
 		return len(batch), nil, nil
 	} else if !errors.Is(batchErr, models.ErrLicensesExhausted) {
 		return 0, nil, batchErr
 	}
 
-	// License pool exhausted. Look up how many seats are still available.
-	usageStats, statsErr := s.gemini.FetchLicenseUsageStats(ctx, projectNumber, location)
+	// License pool almost exhausted. Look up how many seats are still available.
+	usageStats, statsErr := s.geminiClient.FetchLicenseUsageStats(ctx, projectNumber, location)
 	if statsErr != nil {
 		return 0, nil, fmt.Errorf("fetching license usage stats after exhaustion: %w", statsErr)
 	}
@@ -286,23 +302,52 @@ func (s *JoinerService) grantBatch(ctx context.Context, projectID, projectNumber
 		available = 0
 	}
 
-	logger.WarnContext(ctx, "license pool exhausted, soft-failing remaining users",
+	logger.WarnContext(ctx, "license pool nearing exhaustion, initiating 1-by-1 fallback",
 		slog.String("project_id", projectID),
 		slog.String("license_config_path", entry.Path),
-		slog.Int64("available", available),
-		slog.Int("soft_failed", len(batch)-int(available)),
+		slog.Int64("reported_available", available),
+		slog.Int("batch_size", len(batch)),
 	)
 
-	if available == 0 {
-		return 0, batch, nil
+	// Retry remaining users 1-by-1 to ensure no-op successes don't strand available seats.
+	// We rely on the strong consistency of the batch update endpoint.
+	var successful int
+	for _, u := range batch {
+		if retryErr := s.geminiClient.BatchUpdateUserLicenses(ctx, projectID, location, []models.LicenseUpdate{u}); retryErr != nil {
+			if errors.Is(retryErr, models.ErrLicensesExhausted) {
+				logger.WarnContext(ctx, "1-by-1 fallback hit hard limit; pool is completely exhausted",
+					slog.String("project_id", projectID),
+					slog.Int("successful_so_far", successful),
+					slog.String("license_config_path", entry.Path),
+				)
+				// The pool is completely exhausted. The current user and the rest of the batch are soft-failed.
+				break
+			}
+			return successful, nil, retryErr // hard failure on 1-by-1
+		}
+		successful++
 	}
 
-	// Retry with only the available seats. Any error here is a hard failure.
-	trimmed := batch[:available]
-	if retryErr := s.gemini.BatchUpdateUserLicenses(ctx, projectID, location, trimmed); retryErr != nil {
-		return 0, nil, retryErr
+	softFailedCount := len(batch) - successful
+
+	if softFailedCount > 0 {
+		logger.WarnContext(ctx, "1-by-1 fallback complete, soft-failing remaining users",
+			slog.String("project_id", projectID),
+			slog.String("license_config_path", entry.Path),
+			slog.Int("soft_failed", softFailedCount),
+		)
 	}
-	return int(available), batch[available:], nil
+
+	// verbose debug logging: Emitted per batch exhaustion
+	logger.DebugContext(ctx, "batch granted 1-by-1 after pool exhaustion",
+		slog.String("project_id", projectID),
+		slog.Int("successful_1_by_1_count", successful),
+		slog.Int("soft_failed_count", softFailedCount),
+		slog.String("license_config_path", entry.Path),
+		slog.String("subscription_tier", string(batch[0].SKU)),
+	)
+
+	return successful, batch[successful:], nil
 }
 
 // collectGroupMembers pages through all members of groupEmail and updates

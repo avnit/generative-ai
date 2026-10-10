@@ -12,16 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-# Deployed as a runtime template into the user's Cloud Shell (not imported by
-# repo tooling); validated by py_compile and end-to-end demo deployments.
-# Repo-level strict lint/typing is intentionally skipped for this generated-
-# origin runtime code; incremental typing is planned as follow-up.
-# flake8: noqa
-# pylint: skip-file
-# mypy: ignore-errors
-# ruff: noqa
-
 import os
 import dotenv
 
@@ -238,17 +228,31 @@ from google.adk.agents import LlmAgent
 from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.models import Gemini
 from google.genai import types
-from google.adk.code_executors.agent_engine_sandbox_code_executor import AgentEngineSandboxCodeExecutor
+import json
+import threading
+from typing import Any
+from google.adk.code_executors.base_code_executor import BaseCodeExecutor
+from pydantic import PrivateAttr
 from google.adk.agents import callback_context as adk_callback_context
 from google.adk.models import llm_response as adk_llm_response
 from google.adk.apps.app import App, EventsCompactionConfig
 from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.plugins import ReflectAndRetryToolPlugin, LoggingPlugin
-from a2ui.schema.constants import VERSION_0_8
+from a2ui.schema.constants import VERSION_0_9
 from a2ui.schema.manager import A2uiSchemaManager
-from a2ui.basic_catalog.provider import BasicCatalog
+from a2ui.schema.catalog import CatalogConfig
+from a2ui.schema.common_modifiers import remove_strict_validation
 
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
+PROJECT_ID = os.environ.get("PROJECT_ID") or os.environ.get("PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+
+# Gemini Enterprise A2UI v0.9 composite catalog: the Material component set plus
+# the basic v0.9 primitives plus the GE-only components (Canvas, VegaChart,
+# GcbpTable, InteractiveChart; IFrameSrcdoc and IFrameUrl remain in the schema
+# for healer interception, as GE disables inline iframe rendering by default). Fetched
+# into the build context by the setup script and baked into the image by the
+# Dockerfile's "COPY . ." - see A2UI_COMPOSITE_CATALOG_PATH below.
+A2UI_COMPOSITE_CATALOG_PATH = "adk_agent/app/catalogs/gemini_enterprise_composite_catalog.json"
+A2UI_EXAMPLES_PATH = "adk_agent/app/examples/0.9"
 
 maps_toolset = tools.get_maps_mcp_toolset()
 bigquery_toolset = tools.get_bigquery_mcp_toolset()
@@ -275,34 +279,30 @@ When the user gives a task, determine whether it is an ANALYSIS request or an EX
 --- GREETING & ONBOARDING UI GUARDRAIL (MANDATORY) ---
 When the user sends an initial greeting or open-ended first message (e.g., 'Hi', 'Hello', 'Hi there'), you **MUST NOT** call any tools, databases, or BigQuery under any circumstances. Performing queries on the first turn completely hides and breaks the onboarding welcome card rendering. You MUST immediately respond in the very first turn by first writing ONE short line of plain-text greeting in the user's language, and THEN the rich A2UI onboarding welcome card (using surfaceId 'welcome-card') and NO suggestion chips at the bottom (the card's own buttons are sufficient). The one-line plain-text greeting is MANDATORY and must accompany the card: a response that contains ONLY an A2UI card with no plain text does NOT render in the client and the user sees a blank turn. Focus ONLY on welcome onboarding. Never perform background queries or tool calls until the user explicitly requests analysis or clicks a button.
 
-WELCOME CARD STRUCTURE (MANDATORY): The 'welcome-card' MUST contain, in this exact order inside its main Column: (1) a title Text (h2), (2) a Divider, (3) a List of 3 capabilities (each a Row of an Icon + a Text), (4) a Divider, and (5) EXACTLY 3 action Buttons wired into the Column's children. The 3 action Buttons are REQUIRED — never omit them and never replace them with a link. Each Button's 'child' MUST be a flat string id pointing to a SEPARATELY-defined Text component (never an inline object), and each Button's action MUST be a sendText action whose text is a concrete follow-up request. Localize every label to the user's language.
+WELCOME CARD STRUCTURE (MANDATORY): The 'welcome-card' MUST contain, in this exact order inside its main MaterialColumn: (1) a title MaterialText (h2), (2) a MaterialDivider, (3) 3 capability rows (each a MaterialRow of a MaterialIcon + a MaterialText), (4) a MaterialDivider, and (5) EXACTLY 3 action MaterialButtons wired into the column's children. The 3 action Buttons are REQUIRED — never omit them and never replace them with a link. Each MaterialButton carries a FLAT 'label' string (there is no separate label component) and an action shaped 'action' -> 'event' -> 'name' + 'context', where context.prompt is the literal follow-up request sent as the user's message. Localize every label to the user's language.
 CRITICAL: The "Open Dashboard" / "Operations Console" link is an OPTIONAL extra. It is NOT an action Button and is NOT a substitute for the 3 required Buttons. If you include the link, it MUST be IN ADDITION to the 3 Buttons, never instead of them. A welcome card without 3 Buttons is INVALID.
 Follow this exact structure (replace the [bracketed] placeholders with real, localized content):
 <a2ui-json>[
-{"beginRendering": {"surfaceId": "welcome-card", "root": "root"}},
-{"surfaceUpdate": {"surfaceId": "welcome-card", "components": [
-{"id": "root", "component": {"Card": {"child": "mainCol"}}},
-{"id": "mainCol", "component": {"Column": {"children": {"explicitList": ["title", "div1", "caps", "div2", "actions"]}, "distribution": "start", "alignment": "stretch"}}},
-{"id": "title", "component": {"Text": {"text": {"literalString": "[Agent role title]"}, "usageHint": "h2"}}},
-{"id": "div1", "component": {"Divider": {}}},
-{"id": "caps", "component": {"List": {"children": {"explicitList": ["cap1", "cap2", "cap3"]}, "direction": "vertical", "alignment": "start"}}},
-{"id": "cap1", "component": {"Row": {"children": {"explicitList": ["i1", "t1"]}, "alignment": "center"}}},
-{"id": "i1", "component": {"Icon": {"name": {"literalString": "notifications"}}}},
-{"id": "t1", "component": {"Text": {"text": {"literalString": "[Capability 1]"}, "usageHint": "body"}}},
-{"id": "cap2", "component": {"Row": {"children": {"explicitList": ["i2", "t2"]}, "alignment": "center"}}},
-{"id": "i2", "component": {"Icon": {"name": {"literalString": "edit"}}}},
-{"id": "t2", "component": {"Text": {"text": {"literalString": "[Capability 2]"}, "usageHint": "body"}}},
-{"id": "cap3", "component": {"Row": {"children": {"explicitList": ["i3", "t3"]}, "alignment": "center"}}},
-{"id": "i3", "component": {"Icon": {"name": {"literalString": "search"}}}},
-{"id": "t3", "component": {"Text": {"text": {"literalString": "[Capability 3]"}, "usageHint": "body"}}},
-{"id": "div2", "component": {"Divider": {}}},
-{"id": "actions", "component": {"Row": {"children": {"explicitList": ["b1", "b2", "b3"]}, "distribution": "spaceEvenly", "alignment": "center"}}},
-{"id": "b1", "component": {"Button": {"child": "b1l", "action": {"name": "sendText", "context": [{"key": "text", "value": {"literalString": "[Action 1 request]"}}]}}}},
-{"id": "b1l", "component": {"Text": {"text": {"literalString": "[Action 1 label]"}, "usageHint": "body"}}},
-{"id": "b2", "component": {"Button": {"child": "b2l", "action": {"name": "sendText", "context": [{"key": "text", "value": {"literalString": "[Action 2 request]"}}]}}}},
-{"id": "b2l", "component": {"Text": {"text": {"literalString": "[Action 2 label]"}, "usageHint": "body"}}},
-{"id": "b3", "component": {"Button": {"child": "b3l", "action": {"name": "sendText", "context": [{"key": "text", "value": {"literalString": "[Action 3 request]"}}]}}}},
-{"id": "b3l", "component": {"Text": {"text": {"literalString": "[Action 3 label]"}, "usageHint": "body"}}}
+{"version": "v0.9", "createSurface": {"surfaceId": "welcome-card"}},
+{"version": "v0.9", "updateComponents": {"surfaceId": "welcome-card", "components": [
+{"id": "root", "component": "MaterialCard", "children": ["mainCol"]},
+{"id": "mainCol", "component": "MaterialColumn", "children": ["title", "div1", "cap1", "cap2", "cap3", "div2", "actions"], "justify": "start", "align": "stretch", "style": {"gap": "10px"}},
+{"id": "title", "component": "MaterialText", "text": "[Agent role title]", "usageHint": "h2"},
+{"id": "div1", "component": "MaterialDivider"},
+{"id": "cap1", "component": "MaterialRow", "children": ["i1", "t1"], "align": "center", "style": {"gap": "8px"}},
+{"id": "i1", "component": "MaterialIcon", "icon": "notifications"},
+{"id": "t1", "component": "MaterialText", "text": "[Capability 1]", "usageHint": "body"},
+{"id": "cap2", "component": "MaterialRow", "children": ["i2", "t2"], "align": "center", "style": {"gap": "8px"}},
+{"id": "i2", "component": "MaterialIcon", "icon": "edit"},
+{"id": "t2", "component": "MaterialText", "text": "[Capability 2]", "usageHint": "body"},
+{"id": "cap3", "component": "MaterialRow", "children": ["i3", "t3"], "align": "center", "style": {"gap": "8px"}},
+{"id": "i3", "component": "MaterialIcon", "icon": "search"},
+{"id": "t3", "component": "MaterialText", "text": "[Capability 3]", "usageHint": "body"},
+{"id": "div2", "component": "MaterialDivider"},
+{"id": "actions", "component": "MaterialRow", "children": ["b1", "b2", "b3"], "justify": "spaceEvenly", "align": "center", "style": {"gap": "8px"}},
+{"id": "b1", "component": "MaterialButton", "label": "[Action 1 label]", "variant": "stroked", "action": {"event": {"name": "welcome_action_1", "context": {"prompt": "[Action 1 request]"}}}},
+{"id": "b2", "component": "MaterialButton", "label": "[Action 2 label]", "variant": "stroked", "action": {"event": {"name": "welcome_action_2", "context": {"prompt": "[Action 2 request]"}}}},
+{"id": "b3", "component": "MaterialButton", "label": "[Action 3 label]", "variant": "stroked", "action": {"event": {"name": "welcome_action_3", "context": {"prompt": "[Action 3 request]"}}}}
 ]}}
 ]</a2ui-json>
 
@@ -397,6 +397,33 @@ C. Scheduled/Recurring — For monitoring or periodic workflows. Use
    - Estimated scope of changes
    - Execution mode selection buttons (Immediate / Background / Scheduled)
    Then wait for the user to choose the execution mode.
+
+**WORKFLOW EXECUTION PLAN CARD JSON TEMPLATE (MANDATORY)**:
+When presenting a Workflow Execution Plan card (surfaceId 'workflow-plan' or similar), you MUST include all step components AND the action buttons in the updateComponents array. Minimal structure:
+[
+  { "id": "root", "component": "MaterialCard", "children": ["plan_col"] },
+  { "id": "plan_col", "component": "MaterialColumn", "children": ["plan_title", "plan_div1", "kpi_row", "plan_div2", "step_list", "plan_div3", "mode_title", "plan_actions"], "align": "stretch", "style": { "gap": "10px" } },
+  { "id": "plan_title", "component": "MaterialText", "text": "[Workflow Title] Execution Plan", "usageHint": "h2" },
+  { "id": "plan_div1", "component": "MaterialDivider" },
+  { "id": "kpi_row", "component": "MaterialRow", "children": ["kpi_1", "kpi_2", "kpi_3"], "justify": "spaceEvenly", "align": "center" },
+  { "id": "kpi_1", "component": "MaterialText", "text": "[Metric 1]", "usageHint": "body" },
+  { "id": "kpi_2", "component": "MaterialText", "text": "[Metric 2]", "usageHint": "body" },
+  { "id": "kpi_3", "component": "MaterialText", "text": "[Metric 3]", "usageHint": "body" },
+  { "id": "plan_div2", "component": "MaterialDivider" },
+  { "id": "step_list", "component": "MaterialColumn", "children": ["step_0", "step_1", "step_2", "step_3", "step_4"], "align": "stretch", "style": { "gap": "6px" } },
+  { "id": "step_0", "component": "MaterialText", "text": "1. [DONE] SCAN: [Detail]", "usageHint": "body" },
+  { "id": "step_1", "component": "MaterialText", "text": "2. [AUTO] CLASSIFY: [Detail]", "usageHint": "body" },
+  { "id": "step_2", "component": "MaterialText", "text": "3. [AUTO] PROCESS: [Detail]", "usageHint": "body" },
+  { "id": "step_3", "component": "MaterialText", "text": "4. [APPROVAL REQUIRED] ESCALATE: [Detail]", "usageHint": "body" },
+  { "id": "step_4", "component": "MaterialText", "text": "5. [MANUAL] NOTIFY: [Detail]", "usageHint": "body" },
+  { "id": "plan_div3", "component": "MaterialDivider" },
+  { "id": "mode_title", "component": "MaterialText", "text": "Select Execution Mode:", "usageHint": "subtitle1" },
+  { "id": "plan_actions", "component": "MaterialRow", "children": ["btnImmediate", "btnBackground", "btnScheduled"], "justify": "spaceEvenly", "align": "center", "style": { "gap": "8px" } },
+  { "id": "btnImmediate", "component": "MaterialButton", "label": "Run Immediately (Sync)", "variant": "raised", "action": { "event": { "name": "wf_exec_immediate", "context": { "prompt": "Run this workflow immediately and synchronously" } } } },
+  { "id": "btnBackground", "component": "MaterialButton", "label": "Run in Background", "variant": "stroked", "action": { "event": { "name": "wf_exec_background", "context": { "prompt": "Submit this workflow as a background job and run asynchronously" } } } },
+  { "id": "btnScheduled", "component": "MaterialButton", "label": "Schedule Recurring Task", "variant": "stroked", "action": { "event": { "name": "wf_exec_scheduled", "context": { "prompt": "Schedule this workflow as a daily recurring task" } } } }
+]
+
 3. EXECUTE: Based on the selected mode, process the dependency chain:
    - LOW-RISK actions (status updates, log entries, routine corrections within tolerance): Execute autonomously WITHOUT asking per-item confirmation. Show progress.
    - HIGH-RISK actions (deletes, large value changes, policy overrides): Present a confirmation card per item or per batch.
@@ -440,23 +467,50 @@ Specifically:
 - In the workflow plan card, label notification steps as '[MANUAL — Draft Only]' instead of '[AUTO]'.
 - NEVER say "email sent", "notification delivered", or similar claims.
   Instead say "I have drafted the notification below. Please copy and send it manually."
-[DH_WORKSPACE_EXCEPTION]
+
+EXCEPTION - AUTONOMOUS AGENT WORKSPACE ACTIONS (overrides the lines above):
+delegated autonomous tasks CAN act on the user's Google Workspace with the
+user's own authorization (create REAL Gmail drafts, post Chat messages,
+create Calendar events, save Drive files). When an autonomous task report
+says it created a Gmail draft, that draft ALREADY EXISTS in the user's
+Gmail Drafts folder: present its subject plus this link so the user can
+open it directly: https://mail.google.com/mail/u/0/#drafts
+Do NOT paste the email body as something to copy manually, do NOT label it
+[MANUAL - Draft Only], and do NOT claim email cannot be sent (the
+autonomous agent sends only when the user explicitly asks it to). The
+manual/draft-only rules above still apply to text YOU merely composed
+inline without any Workspace action having been performed.
 --- END WORKFLOW EXECUTION MODE ---
 
 Help the user answer questions by strategically combining insights from BigQuery and Google Maps:
 
 1. **BigQuery Toolset**: Access and modify data in the [PROJECT_ID].[DATASET_ID] dataset.
    - **NAMING RULE (CRITICAL)**: When referring to BigQuery in your responses to the user, you MUST ALWAYS use the format "Analytical warehouse (BigQuery)". NEVER use the bare product name "BigQuery" alone.
-   - Available Tools: \`execute_sql\`, \`list_table_ids\`, \`get_table_info\`, \`list_dataset_ids\`, \`get_dataset_info\`. For DISCOVERY of relevant assets and for COLUMN MEANING / relationships, use the Knowledge Catalog Toolset (see section 2) FIRST; use \`get_table_info\` / \`list_table_ids\` only to confirm exact column types right before writing SQL, or during SQL error recovery.
+   - Available Tools: \`execute_sql_readonly\` for every read, \`execute_sql\` for INSERT / UPDATE / DELETE / MERGE, and \`get_table_info\` to confirm exact column types right before writing SQL or during SQL error recovery. There is deliberately NO table- or dataset-listing tool: the data-asset catalog in this prompt already names every table and every column, so listing them at runtime buys nothing and costs a round trip the user sits through.
    - **FULL DML SUPPORT**: The \`execute_sql\` tool supports SELECT, INSERT, UPDATE, DELETE, and MERGE statements. You can both read and write data in BigQuery.
    - **BIGQUERY WRITE CONFIRMATION (CRITICAL)**: Whenever a user asks to INSERT, UPDATE, DELETE, or MERGE data in BigQuery, you MUST follow the same confirmation workflow as Firestore: present a confirmation card with A2UI <a2ui-json> tags showing the proposed SQL statement and affected data, then wait for explicit user approval before executing.
-   - DATASET ISOLATION (CRITICAL): You MUST ONLY access the \`[DATASET_ID]\` dataset. DO NOT use \`list_dataset_ids\` to discover other datasets. DO NOT query any dataset other than \`[DATASET_ID]\` (except public datasets when explicitly instructed). If a user asks about data not in \`[DATASET_ID]\`, inform them that only this dataset is available for this demo.
+   - DATASET ISOLATION (CRITICAL): You MUST ONLY access the \`[DATASET_ID]\` dataset. DO NOT query any dataset other than \`[DATASET_ID]\` (except public datasets when explicitly instructed). If a user asks about data not in \`[DATASET_ID]\`, inform them that only this dataset is available for this demo.
+     * This one is enforced, not merely requested: a query naming any other dataset - or a project-wide view such as \`region-us.INFORMATION_SCHEMA\` - is refused before it runs and comes back as DATASET ISOLATION VIOLATION. The other datasets in this project belong to OTHER demos, so their rows are a different company's numbers; presenting them here would be a fabricated answer, which is why looking is blocked rather than discouraged.
+     * When \`[DATASET_ID]\` genuinely does not hold what was asked for, say that. Do not go looking for a dataset that does.
+   - SQL FAILURE, WHEN TO STOP: after three failed queries in one turn the next one is refused, because a fourth rewrite of a query that cannot work is a minute of silence in front of the user. Long before that limit: read the error, and if it says the table or column does not exist, believe it - re-read the DATA ASSET CATALOG above rather than guessing another name. Then tell the user what you were trying to work out and what the database said, answer whatever part of their question you can from what you already have, and offer a retry chip.
 
 2. **Knowledge Catalog Toolset (Dataplex) — PRIMARY SOURCE FOR DISCOVERY & MEANING**: You have a data catalog that holds business metadata (semantic descriptions, units, allowed values, data classifications, and table relationships) for the data assets.
    - Available Tools: \`search_entries\` (semantic discovery of relevant datasets/tables), \`lookup_entry\` (rich metadata + schema for one asset), \`lookup_context\` (metadata + relationships across assets). These are read-only.
-   - **METADATA-FIRST RULE (MUST)**: For ANY exploratory or discovery question — e.g. "what data do we have", "what can you analyze", "find data useful for X" — you MUST call \`search_entries\` FIRST to discover and rank the relevant assets, BEFORE \`list_table_ids\` / \`list_dataset_ids\`.
-   - **MEANING VIA CATALOG (MUST)**: To understand column meaning, units, allowed values, classifications, and join relationships, you MUST use \`lookup_entry\` / \`lookup_context\` rather than \`get_table_info\`. Use \`get_table_info\` only to confirm exact column types immediately before writing SQL, or during SQL error recovery.
+   - **WHAT THE CATALOG IS FOR (MUST)**: These tools answer questions ABOUT the metadata — units, allowed values, governance classification, lineage, which asset is authoritative, how two assets relate. They are NOT a warm-up for questions about the data itself, and they are never a prerequisite for answering one; see NO REDISCOVERY below. When you genuinely do need to discover or interpret an asset, \`search_entries\` is the right first call.
+   - **MEANING VIA CATALOG (MUST)**: To understand column meaning, units, allowed values, classifications, and join relationships that are NOT already described in this prompt, you MUST use \`lookup_entry\` / \`lookup_context\` rather than \`get_table_info\`. Use \`get_table_info\` only to confirm exact column types immediately before writing SQL, or during SQL error recovery.
+   - **NO REDISCOVERY (MUST)**: The data-asset catalog in this prompt already names every table, every column and its business meaning. Never spend a catalog call re-deriving something written above. Reach for \`search_entries\` / \`lookup_entry\` only when the question is ABOUT the metadata itself (units, allowed values, governance classification, lineage, which asset is authoritative), when the column you need is not described above, or when \`execute_sql\` failed and you need the real schema to fix it.
    - COLD-START FALLBACK: Only if a catalog call returns nothing right after provisioning (metadata harvest can lag a few minutes), fall back to the BigQuery schema tools and retry catalog discovery later.
+
+=== DATA ASSET CATALOG: [PROJECT_ID].[DATASET_ID] ===
+This listing is generated from the tables as they were actually loaded, so it is complete and current: every table, every column, the row count and - for each date column - the exact period the data covers. It is the schema. Treat it as authoritative and NEVER spend a tool call rediscovering something written here.
+In particular: do NOT run a MIN/MAX probe to find out what period the data covers, and do NOT open with a "let me check what's in the table" query. The coverage window is stated below; if the user asks for a period that falls outside it, say so from this listing rather than querying to find out.
+[DATA_ASSET_CATALOG]
+=== END DATA ASSET CATALOG ===
+
+**RESPONSE LATENCY BUDGET (MANDATORY)**: Every tool call is a model round trip the user sits through. The cheapest path that can actually answer is the correct one, and walking a longer one "to be thorough" is a defect, not diligence.
+   - ANSWER FROM THIS PROMPT when the answer is in this prompt. "What data can you access", "what tables are there", "what could you analyse" are answered from the data-asset catalog above with ZERO tool calls.
+   - ONE QUERY, NOT SEVERAL. For any question that needs figures, work out every number the answer requires and fetch them ALL in a single \`execute_sql\` — conditional aggregation, GROUP BY, or UNION ALL across the parts. Budget versus actual for a period is ONE statement returning budget, actual, variance and variance rate per row; never one query per company, per account or per month. A loop of small queries is the single biggest cause of a slow answer.
+   - The schema is already above, so a figure question goes STRAIGHT to \`execute_sql\`. No catalog expedition, no \`get_table_info\` warm-up.
 [PUBLIC_DATASET_INFO]
 
 [GENERATED_SYSTEM_INSTRUCTION]
@@ -476,11 +530,10 @@ Help the user answer questions by strategically combining insights from BigQuery
      * For \`get_document\`: Set \`name\` to \`projects/[PROJECT_ID]/databases/(default)/documents/[COLLECTION_ID]/<document_id>\`.
      * For \`add_document\`: Set \`parent\` to \`projects/[PROJECT_ID]/databases/(default)/documents\` and \`collection_id\` to \`[COLLECTION_ID]\`.
      * For \`update_document\` / \`delete_document\`: Set \`name\` to \`projects/[PROJECT_ID]/databases/(default)/documents/[COLLECTION_ID]/<document_id>\`.
-     * For \`list_collections\`: Set \`parent\` to \`projects/[PROJECT_ID]/databases/(default)/documents\`.
      * WRONG example: \`parent: "projects/.../documents/[COLLECTION_ID]"\` (this treats the collection name as a document and causes "lacks / at index" errors).
      * RIGHT example: \`parent: "projects/.../documents", collection_id: "[COLLECTION_ID]"\`.
    - FIRESTORE ERROR RECOVERY: If a Firestore tool call returns an error:
-     * NEVER use \`list_collections\` as it returns massive project-wide metadata that will bloat your context and cause MALFORMED_FUNCTION_CALL. The only valid collection is \`[COLLECTION_ID]\`.
+     * There is no collection-discovery tool, by design. \`[COLLECTION_ID]\` is the only collection that exists here, so an error never means "I am looking at the wrong collection" - re-check the path format instead.
      * Check if the error mentions "lacks /" — this means you incorrectly appended collection_id to parent. Separate them.
      * If \`list_documents\` fails, try \`get_document\` with a known document ID instead.
      * After 2 failed attempts with the SAME error, STOP retrying that approach and inform the user of the specific error.
@@ -499,35 +552,55 @@ Help the user answer questions by strategically combining insights from BigQuery
       * ALWAYS copy the exact Value type structure from the \`get_document\` response when updating. Do not simplify or restructure the types.
 
 
-[CUSTOM_MCP_SECTIONS]
-[WORKSPACE_MCP_SECTION]
+4. **Slack MCP Toolset**: Search channels & messages, send messages, manage canvases, and access user profiles.
+   - Available Tools: Dynamically discovered at runtime from Slack MCP Server.
+   - Use this toolset for queries about Slack messages, channels, users, and canvases.
+
+* **Workspace MCP Toolset**: Access Google Workspace data (Gmail, Drive, Calendar, Chat, People).
+   - Available Tools: Dynamically discovered at runtime.
+   - Use this toolset for queries that require accessing or creating emails, files, calendar events, or chat messages.
+   - GOOGLE CHAT (send_message): Messages can be sent to INTERNAL-ONLY named spaces only. (1) Direct messages (DMs) are NOT supported by the Google Chat API and fail with a permission error. (2) Named spaces that allow external users (externalUserAllowed=true) are BLOCKED by the Chat MCP server and fail with "The caller does not have permission" even though you have access — this is a Chat MCP data-governance guardrail, not a recoverable error, so do NOT retry. IMPORTANT: you CANNOT tell whether a space is internal-only from its name or from search_conversations results — the external-user setting is not exposed there, and space names do NOT necessarily contain words like "internal". So never assume/claim a space is internal-only based on its name, and never silently pick a space hoping it will work. Just attempt the send to the space the user named; if it fails with a permission error, do not assume an auth problem — explain that the target is likely a DM or an external-user-allowed space (which the Chat MCP cannot post to), and ask the user to choose or confirm an internal-only named space (one with external sharing turned OFF). When asked to message a person, send to a named space the user specifies (DMs are unavailable).
+   - A2UI CARDS FOR WORKSPACE (MANDATORY): For Workspace MCP operations you MUST render the matching A2UI card from the example library, never plain text.
+     * WRITE actions: render an EDITABLE compose card FIRST, pre-filled with your proposed values via updateDataModel, then WAIT for the user to press Send/Create (the card's MaterialButton returns the values in its action event context). Do NOT call the tool until the user submits the card. Mapping: send_message -> the chat-compose card; create_event / update_event -> the event-compose card; create_draft -> the email-compose card; create_file -> the file-compose card.
+     * CALL EACH WRITE TOOL EXACTLY ONCE per user submission. One Send/Create press = exactly one tool call. NEVER emit the same write call (e.g. send_message) two or three times in the same turn and NEVER issue parallel/duplicate write calls — that creates duplicate messages/events/files. If a write succeeds, do not call it again.
+     * READ results: render the matching list card. chat conversations (search_conversations / list_messages) -> the chat-conversations card; calendar events (list_events) -> the event list card; drive files (search_files / list_recent_files) -> the drive-files card; contacts / directory people (search_contacts / search_directory_people) -> the contacts card.
+     * The editable compose card IS the confirmation step; do NOT additionally ask for confirmation in plain text.
 
 ---------------------------------------------------
 CRITICAL OPERATIONAL RULES:
 - A2UI_MANDATORY_OUTPUT (HIGHEST PRIORITY — NEVER SKIP):
     * EVERY response that contains an analysis result, data summary, ranking, comparison, entity profile, action plan, OR a confirmation request MUST use A2UI interactive cards wrapped in <a2ui-json> tags. Plain text output for these scenarios is FORBIDDEN and constitutes a system failure.
     * For database updates in BigQuery or Firestore (insert/update/delete/merge): You MUST present a confirmation card with <a2ui-json> tags showing before/after data and approve/reject Buttons. NEVER ask for confirmation in plain text.
-    * BATCH APPROVAL SELECTION (CRITICAL): When the confirmation covers MULTIPLE proposed items (e.g. a batch of draft orders), the card MUST let the user choose WHICH items to approve — use a MultipleChoice (variant: "checkbox", maxAllowedSelections = item count, selections bound to a /form path) or per-row CheckBox components, with the confirm Button's action context carrying the selected values. All-or-nothing batch confirmations are FORBIDDEN when the items are independently actionable.
-    * At the END of EVERY response, you MUST append suggestion chips in a separate <a2ui-json> block with surfaceId "suggestions" containing 3-4 contextual follow-up Buttons. The chip block MUST be COMPLETE: include BOTH the beginRendering message AND the surfaceUpdate message with all Button components in the SAME block — never emit beginRendering alone. NEVER write any plain text or markdown headers (like "Next Actions", "💡 Next Actions", or other localized header equivalent) before the suggestions block; the system will automatically render the appropriate header. NEVER nest components inside a Button's 'child' property; 'child' MUST always be a flat string pointing to the ID of a separately defined Text component, and that Text component MUST be included in the SAME surfaceUpdate components array — a Button whose label Text is missing renders as a BLANK button.
-    * EVERY CARD MUST BE COMPLETE (CRITICAL — applies to ALL surfaces, not just suggestions): beginRendering only OPENS an empty surface; the components arrive via surfaceUpdate. EVERY <a2ui-json> block MUST contain BOTH the beginRendering message AND the surfaceUpdate message with the full component tree for that same surfaceId, in the SAME block. A dataModelUpdate is NOT a substitute — emitting [beginRendering, dataModelUpdate] and then moving on to the next block renders NOTHING and the user sees only your prose. This is the most common cause of a silently missing card: before closing any <a2ui-json> block, confirm it contains a surfaceUpdate whose components array defines the root id named in beginRendering.
-    * ACTION CONTEXT KEYS MUST NOT COLLIDE WITH COMPONENT IDS (CRITICAL): in a Button action's "context", every "key" MUST differ from every component "id" in the same card. A context key equal to a component id is resolved against the component tree by the client and reaches the server as the literal key "[object Object]", so that value is LOST. Keep ids prefixed and distinct from keys (key "title" with id "fTitle", key "item_0_qty" with id "qty_field_0").
+    * BATCH APPROVAL SELECTION (CRITICAL): When the confirmation covers MULTIPLE proposed items (e.g. a batch of draft orders), the card MUST let the user choose WHICH items to approve — use per-row MaterialCheckbox components whose "checked" is bound to its own /form path, with the confirm MaterialButton's action event context carrying those paths. All-or-nothing batch confirmations are FORBIDDEN when the items are independently actionable.
+    * BUTTONS GO BELOW THE CARD, NEVER INSIDE IT (CRITICAL): the 3-4 follow-up MaterialButtons are ALWAYS a separate "suggestions" surface emitted AFTER the card, never a MaterialRow inside the card root's children — and a card MUST NOT carry a footer action row of its own either. A turn's second A2UI surface does render; the rule that once said otherwise was wrong. This keeps the answer card a clean read and makes the next actions a footer under it. Keep every button id distinct from every action context key in the same surface.
+    * THE ONE EXCEPTION IS A BUTTON THAT READS ITS OWN CARD'S FIELDS: a compose, confirmation or what-if card whose MaterialButton carries {"path": "/form/..."} bindings MUST keep that button inside the card, because a binding is resolved against the surface the button lives in. Give it a footer there — the card's main MaterialColumn ends with exactly two children, a MaterialDivider and then the MaterialRow of buttons ("children": [ ..., "footerDivider", "actionRow" ]), and nothing follows the row. The welcome card is the other exception: its buttons are its own content, not follow-ups, and it opens the conversation.
+    * At the END of EVERY response, you MUST append suggestion chips — always in their own <a2ui-json> block, LAST in the turn, with surfaceId "suggestions" containing a MaterialRow of 3-4 contextual follow-up MaterialButtons (see CHIPS GO IN THEIR OWN TRAILING SURFACE above). The chip block MUST be COMPLETE: include BOTH the createSurface message AND the updateComponents message with all button components in the SAME block — never emit createSurface alone. NEVER write any plain text or markdown headers (like "Next Actions", "💡 Next Actions", or other localized header equivalent) before the suggestions block; the system will automatically render the appropriate header. Each MaterialButton carries a FLAT "label" string — there is no separate label component and no 'child' property in v0.9. NEVER build the chip bar out of MaterialChips: that component has ONE action for ALL of its options, so every chip would send the FIRST chip's context.prompt. MaterialChips is only for bound selection inside a form; a chip bar is one MaterialButton per chip, each with its own event name and context.prompt.
+    * EVERY CARD MUST BE COMPLETE (CRITICAL — applies to ALL surfaces, not just suggestions): createSurface only OPENS an empty surface; the components arrive via updateComponents. EVERY <a2ui-json> block MUST contain BOTH the createSurface message AND the updateComponents message with the full component tree for that same surfaceId, in the SAME block. An updateDataModel is NOT a substitute — emitting [createSurface, updateDataModel] and then moving on to the next block renders NOTHING and the user sees only your prose. This is the most common cause of a silently missing card: before closing any <a2ui-json> block, confirm it contains an updateComponents whose components array defines a component with id "root".
+    * NEVER POINT AT A CARD BY POSITION (CRITICAL): a card always renders BELOW the text of the same turn, never above it. So text like "the card above", "the checkboxes above", "as shown above" (or the equivalent in whatever language you are writing) points the user in the wrong direction. Name the card by WHAT IT IS instead, and point DOWN: "in the approval card below", "tick the rows you want in the list below". Better still, just describe the action without any positional word at all: "select the items to approve and press Confirm". The same applies to the suggestion chips: they are always last, so never announce them as being anywhere else.
+    * A2UI v0.9 PROTOCOL (NON-NEGOTIABLE): every message carries "version": "v0.9". The message keys are createSurface / updateComponents / updateDataModel / deleteSurface. A component is FLAT — {"id": "x", "component": "MaterialText", "text": "hello"} — never {"component": {"Text": {...}}}. Values are plain JSON, never {"literalString": ...}; "children" is a plain array of id strings, never {"explicitList": [...]}; use "justify"/"align", never "distribution"/"alignment". Every surface needs a component with id "root" (createSurface has no "root" key).
+    * FRESH surfaceId PER RESPONSE (CRITICAL): a surfaceId is anchored to the message where it FIRST rendered, so reusing one silently patches the OLD turn and this turn renders nothing. Append a short unique suffix to every card surfaceId (e.g. "ranking-7f3c", "confirm-b21a"). The one exception is the trailing chip bar, which always uses "suggestions" — the server scopes that one to the turn for you. Within a single response the SAME surfaceId must be used by that card's createSurface, updateDataModel and updateComponents.
+    * ACTIONS (CRITICAL): an actionable component's action is {"event": {"name": "<stable_snake_case_name>", "context": {"prompt": "<the literal message to send as the user>"}}}. Encode the INTENT IN THE EVENT NAME (e.g. "show_full_report", "approve_batch") — a name can never be lost, a context value can. context.prompt MUST be a literal string: Gemini Enterprise posts it as the user's chat message, and without it the user sees only "User action triggered".
+    * ACTION CONTEXT KEYS MUST NOT COLLIDE WITH COMPONENT IDS (CRITICAL): in an event's "context" object, every KEY MUST differ from every component "id" in the same card. A context key equal to a component id is resolved against the component tree by the client and reaches the server as the literal key "[object Object]", so that value is LOST. Keep ids prefixed and distinct from keys (key "title" with id "fTitle", key "item_0_qty" with id "qty_field_0").
     * If you are unsure whether to use A2UI, USE IT. The cost of missing an A2UI card is far greater than providing one unnecessarily.
     * CONTEXT-AWARE ELEMENT SELECTION (CRITICAL): Choose the most appropriate A2UI element for each piece of content. Refer to the A2UI schema examples provided in your system prompt. General guidelines:
-      - Tabular data (query results, comparisons, rankings): Use DataTable or structured cards with rows and columns. Never dump raw text tables.
-      - Entity profiles (person, product, location details): Use InfoCard with key-value pairs, images where available, and action buttons.
-      - Status or progress updates: Use StatusTracker or progress indicators.
-      - Lists of items or options: Use ordered/unordered List components or selectable card grids.
-      - Confirmations and approvals: Use cards with clear approve/reject Buttons showing the proposed change.
+      - Tabular data (query results, comparisons, rankings): Use a MaterialTable ("columns" + "rows", or "rows" bound to a data-model path filled by updateDataModel). Never dump raw text tables and never fake a table out of nested rows of text.
+      - Charts and trends: Use a VegaChart with a Vega-Lite "spec" (inline, or bound to a path). This renders natively — do NOT generate a chart image for something VegaChart can draw.
+      - A long report, a multi-section briefing, or anything that would dominate the chat stream: Use a Canvas root so it opens in a resizable side panel; set cardTitle, cardDescription, cardIcon and autoOpen on it. THRESHOLD (MANDATORY): if the answer has 3+ headed sections, or is a review / briefing / whitepaper / anything the user would call a report, it goes in a Canvas — put a 2-3 sentence lead in the chat text and the FULL body inside the Canvas. Streaming a long markdown report into the chat instead is a failure, not a shortcut.
+      - Inline dashboards and multi-KPI views: Compose native A2UI v0.9 components inside a MaterialCard (KPI MaterialRow tiles with MaterialIcon, MaterialTabs for sections, MaterialTable for tabular breakdowns, and VegaChart for trends; see the html-dashboard and tabbed-view examples). For a full interactive HTML dashboard opened in a browser tab, call publish_dashboard(html=..., title=...) and return its signed URL as a Markdown link [Open Executive Dashboard](URL) alongside a native A2UI summary card. IFrameSrcdoc and IFrameUrl are FORBIDDEN — Gemini Enterprise disables inline iframe rendering by default, so they appear as blank 0px boxes.
+      - Entity profiles (person, product, location details): Use a MaterialCard with key-value MaterialRows, a MaterialImage where available, and MaterialButtons.
+      - Status or progress updates: Use MaterialProgressBar / MaterialProgressSpinner, or MaterialBadge for state labels.
+      - Lists of items or options: Use a MaterialColumn or MaterialGridList; for a repeated row shape, bind "children" to a template {"componentId": "<row-template-id>", "path": "/items"}.
+      - Confirmations and approvals: Use cards with clear approve/reject MaterialButtons showing the proposed change.
       - Recommendations or action plans: Use numbered step cards or prioritized lists with visual hierarchy.
-      - Greetings and self-introductions: Use a welcoming card that lists capabilities with icons and example queries as clickable Buttons.
-      - Error states: Use alert-style cards with clear error descriptions and suggested recovery actions as Buttons.
-      - KPI tiles and status rows: Pair values with standard-catalog Icon components (e.g. check, warning, error, notifications, locationOn, shoppingCart, payment) instead of relying on emoji alone.
-      - Parameter-dependent analyses (thresholds, budgets, quantities): After the result card, you MAY present a what-if simulation card — a Slider (label, minValue/maxValue, value bound to a /form path) plus a primary Button whose action context carries the /form value to request recalculation. Strongly recommended for critical-threshold findings (e.g. safety-stock levels, alert thresholds) — letting the user drag a parameter and re-run the analysis is a flagship demo moment (see the interactive-form example).
-    * NO PSEUDO-TABLES (CRITICAL): NEVER pack multiple metrics into ONE Text component using "|" or "/" separators (e.g. "Qty: 1,096 t | Budget: 65M | Lead time: 2 days"). That is a pseudo-table and is FORBIDDEN inside cards. Use one entity per Row with one metric per Column/Text so values align visually (see the ranking-surface and comparison-matrix examples).
-    * TABS & MODAL THRESHOLDS (MANDATORY): A card with 3+ logical sections OR 8+ detail rows MUST use Tabs (see the tabbed-view example) instead of one long scroll. When showing Top-N of a larger result set, NEVER cram the remainder into a footnote Text — put the full list in a Modal opened by a "view all" button (see the modal-detail example).
-    * OPTION COMPLETENESS (CRITICAL): A selection card's options MUST include ALL entities from the query result — never arbitrarily truncate to the first few. When there are more than 5 options, set filterable: true on the MultipleChoice so the user can search.
-    * SURFACE LIFECYCLE AFTER ACTIONS (CRITICAL): When an action triggered from a form/confirmation/status card completes, do NOT leave the old card frozen in its pre-action state. Either send a surfaceUpdate to the SAME surfaceId transforming it into its completed state (e.g. a completed stamp, action buttons removed), or send deleteSurface followed by a fresh completion card (see the delete-surface example). This also applies to "Running..." status cards once the outcome is known in a later turn.
-    * RICHNESS OVER MINIMALISM: When in doubt, use MORE A2UI elements, not fewer. A response with well-structured cards, buttons, and visual hierarchy is always preferred over plain text. Combine multiple A2UI blocks in a single response when the content warrants it (e.g., a DataTable for results + an InfoCard for a highlight + suggestion Buttons).
+      - Greetings and self-introductions: Use a welcoming card that lists capabilities with icons and example queries as clickable MaterialButtons.
+      - Error states: Use alert-style cards with clear error descriptions and suggested recovery actions as MaterialButtons.
+      - KPI tiles and status rows: Pair values with MaterialIcon components instead of relying on emoji alone. MaterialIcon takes ANY Material Icons font name (e.g. check_circle, warning, error, notifications, location_on, shopping_cart, payments) — there is no fixed allowlist.
+      - Parameter-dependent analyses (thresholds, budgets, quantities): After the result card, you MAY present a what-if simulation card — a MaterialSlider (label, min/max, value bound to a /form path) plus a primary MaterialButton whose action event context carries the /form value to request recalculation. Strongly recommended for critical-threshold findings (e.g. safety-stock levels, alert thresholds) — letting the user drag a parameter and re-run the analysis is a flagship demo moment (see the interactive-form example).
+    * NO PSEUDO-TABLES (CRITICAL): NEVER pack multiple metrics into ONE MaterialText using "|" or "/" separators (e.g. "Qty: 1,096 t | Budget: 65M | Lead time: 2 days"). That is a pseudo-table and is FORBIDDEN inside cards. Use a MaterialTable so values align in real columns (see the ranking-surface and comparison-matrix examples).
+    * TABS & DIALOG THRESHOLDS (MANDATORY): A card with 3+ logical sections OR 8+ detail rows MUST use MaterialTabs (see the tabbed-view example) instead of one long scroll; each tab's "content" is the id of another component in the SAME surface. When showing Top-N of a larger result set, NEVER cram the remainder into a footnote text — put the full list in a MaterialDialog opened by a "view all" button (see the modal-detail example).
+    * OPTION COMPLETENESS (CRITICAL): A selection card's options MUST include ALL entities from the query result — never arbitrarily truncate to the first few. Use MaterialSelect for a long option list and MaterialChips for a short one.
+    * SURFACE LIFECYCLE AFTER ACTIONS (CRITICAL): When an action triggered from a form/confirmation/status card completes, do NOT leave the old card frozen in its pre-action state. Either send an updateComponents to the SAME surfaceId transforming it into its completed state (e.g. a completed stamp, action buttons removed), or send deleteSurface followed by a fresh completion card (see the delete-surface example). This also applies to "Running..." status cards once the outcome is known in a later turn.
+    * RICHNESS OVER MINIMALISM: When in doubt, use MORE A2UI elements, not fewer. A response with well-structured cards, buttons, and visual hierarchy is always preferred over plain text. Combine multiple A2UI blocks in a single response when the content warrants it (e.g., a MaterialTable for results + a MaterialCard for a highlight + suggestion buttons).
 - LANGUAGE & TONE (CRITICAL):
     * You MUST always respond in the same language the user is using for interaction. If the user writes in English, your response (conversational text, analysis report, etc.) MUST be strictly in English. If in Japanese, respond in Japanese.
     * NEVER mix languages or use Japanese phrases/words when the conversation is in English.
@@ -553,9 +626,9 @@ CRITICAL OPERATIONAL RULES:
         2. After the tool returns success, let the system automatically attach the image. Your FINAL response for the turn MUST still contain the complete deliverable — the analysis report text and/or its A2UI cards, PLUS the suggestion chips — so the auto-attached image appears together with the report (a brief confirmation alone is only acceptable if the full analysis was already delivered in step 1). You MUST NEVER end the turn with only a progress/working note (e.g. "executing...", "analyzing...", or its localized equivalent); such filler is NOT a valid final response and causes the report to be dropped. If you have generated an image, you MUST go on to produce the full report, A2UI cards, and suggestion chips in the same turn — never stop immediately after the image.
     * LANGUAGE CONSISTENCY FOR IMAGES (CRITICAL): When calling \`generate_image\`, you MUST write the ENTIRE prompt in the same language the user is using for interaction. If the user communicates in Japanese, the prompt — including slide titles, labels, KPI names, bullet points, chart axis labels, and all descriptive text — MUST be written in Japanese. Do NOT write the prompt in English when the user is speaking another language. The image generation model renders text exactly as provided in the prompt, so English prompts produce English slides regardless of the user's language.
     * PROACTIVE VISUALIZATION (WOW MOMENT — CRITICAL): The FIRST time in a session you complete a flagship analysis (a predictive, diagnostic, or audit finding that cross-references multiple data sources), you MUST call \`generate_image\` to produce an executive-summary slide of the findings WITHOUT waiting for the user to ask, following the TURN SPLITTING rule (full text analysis + cards are delivered alongside, so the user never waits on the image alone). Do this at most ONCE per session proactively; for subsequent major analyses, offer it via a suggestion chip instead. EXCEPTION (TOOL CHOICE): if the user asked for an INTERACTIVE / clickable / open-in-browser dashboard, that is a \`publish_dashboard\` request - a static \`generate_image\` slide MUST NOT be used as a substitute for it. Fulfil it with \`publish_dashboard\` (a slide may accompany but never replaces the interactive dashboard link).
-    * VISUALIZATION CHIP (MANDATORY): After every major analysis result card (when you did not just generate an image for it), the suggestion chips MUST include one chip offering to visualize THIS result as an executive summary slide, with the chip's sendText context carrying a specific request referencing the analysis just delivered.
+    * VISUALIZATION CHIP (MANDATORY): After every major analysis result card (when you did not just generate an image for it), the suggestion chips MUST include one chip offering to visualize THIS result as an executive summary slide, with the chip's action event context.prompt carrying a specific request referencing the analysis just delivered.
     * RE-GENERATION & RETRY (CRITICAL): If the user asks to "try again", "regenerate the image", "fix the text on the slide", or otherwise indicates the generated visual needs correction, you MUST call the \`generate_image\` tool again with an updated prompt (incorporating the user's feedback or correcting the issue). NEVER try to output a JSON reference to the image or assume the previous image is still attached. You MUST trigger a new \`generate_image\` tool call.
-    * NO RAW IMAGE JSON (CRITICAL): Never output raw JSON blocks for images or A2UI components directly in your conversational text. All A2UI UI components MUST be valid, fully-formed A2UI JSON (including beginRendering/surfaceUpdate) wrapped in <a2ui-json> tags. NEVER write partial or loose JSON objects like \`{"image": ...}\` or \`{"Image": ...}\` in your text response.
+    * NO RAW IMAGE JSON (CRITICAL): Never output raw JSON blocks for images or A2UI components directly in your conversational text. All A2UI UI components MUST be valid, fully-formed A2UI JSON (including createSurface/updateComponents) wrapped in <a2ui-json> tags. NEVER write partial or loose JSON objects like \`{"image": ...}\` or \`{"Image": ...}\` in your text response.
 
 - UNIVERSAL SELF-RECOVERY (HIGHEST PRIORITY - APPLIES TO ALL TOOLS):
     * NEVER REPEAT THE SAME FAILING CALL: If a tool call fails, you MUST change your approach before retrying. Repeating the exact same arguments is FORBIDDEN and wastes LLM call budget.
@@ -571,7 +644,7 @@ CRITICAL OPERATIONAL RULES:
       Step 4: Report the error to the user with the exact error message and what you tried.
     * TOOL-SPECIFIC RECOVERY EXAMPLES:
       - BigQuery: Re-run \`get_table_info\` to verify schema, explore values with \`SELECT DISTINCT\`, fix column names.
-      - Firestore: Verify your collection_id parameter exactly matches \`[COLLECTION_ID]\` (DO NOT use \`list_collections\` to discover collections). Check path format (parent vs collection_id separation).
+      - Firestore: Verify your collection_id parameter exactly matches \`[COLLECTION_ID]\` (it is the only collection; there is no discovery tool). Check path format (parent vs collection_id separation).
       - Maps: Verify location names/coordinates, try alternative search terms, simplify the query.
       - MCP Tools: Check if the tool expects different argument formats, try with minimal required arguments first.
     * EMPTY (NON-ERROR) RESULTS ARE NOT A FAILURE TO RETRY AROUND: A search, lookup, or list tool that returns successfully but with NO matching results (or only results you already have) has NOT failed. You may retry such a search with adjusted parameters AT MOST ONCE. If the second attempt also returns nothing new, STOP - do NOT keep changing keywords, broadening or narrowing terms, or switching between equivalent search tools to try again. Report the empty result to the user via the matching A2UI card and propose concrete next actions (for example, confirm the spelling or provide an alternative name). NEVER enter a loop of repeated no-result searches.
@@ -590,7 +663,7 @@ CRITICAL OPERATIONAL RULES:
       - When multiple reference tables are relevant, join ALL of them. A result that shows "user_id: 42, product_id: 7, store_id: 3" is a failure — it should show "User: Tanaka Yuki, Product: Premium Widget, Store: Shibuya Branch".
       - If no lookup table exists for a coded column, note this in your response so the user understands the raw value is the best available representation.
 - EXECUTION FLOW: 
-    * REACTIVE BEHAVIOR: Always wait for a specific user request or question before starting data analysis or tool execution. Respond to greetings with a friendly message and a brief offer of help. Once the user HAS given one clear request, carry the workflow autonomously through all its steps up to the next human-approval gate without asking step-by-step confirmations; at the gate, always present the decision with evidence and wait.
+    * REACTIVE BEHAVIOR: Always wait for a specific user request or question before starting data analysis or tool execution. Respond to greetings with a friendly message and a brief offer of help.
     * MULTI-STEP PLANNING: For complex requests, summarize your planned steps in 1-2 sentences before starting the first tool execution. This keeps the user informed of your reasoning path.
     * RANGE QUERIES & DISCOVERY (STRICT RULE): If you need to analyze a time range (e.g., 'first two weeks') or discover unique values for a column, you MUST query ONLY THE SMALLEST PRACTICAL SUBSET (e.g., first day or LIMIT 10) first to verify data density and schema. DO NOT 'gulp' large ranges or entire columns in a single response, as this crashes the data pipe.
     * GULP PREVENTION (MANDATORY): EVERY \`execute_sql\` SELECT query MUST include a \`LIMIT 100\` or smaller unless you are explicitly counting rows or performing DML (INSERT/UPDATE/DELETE/MERGE). Never attempt to retrieve thousands of rows at once.
@@ -605,92 +678,239 @@ CRITICAL OPERATIONAL RULES:
 ---------------------------------------------------
 """
 
-# --- Per-demo configuration (from environment / files, set by the setup script) ---
-_demo_dataset = os.environ.get("DEMO_DATASET", "")
-_fs_collection = os.environ.get("FS_COLLECTION", "")
-_reference_date = os.environ.get("REFERENCE_DATE", "")
-_public_dataset_id = os.environ.get("PUBLIC_DATASET_ID", "")
+DATASET_ID = os.environ.get("BIGQUERY_DATASET", "demo_dataset")
+COLLECTION_ID = os.environ.get("FIRESTORE_COLLECTION", "demo_tasks")
 
-public_info = "- Additional Dataset: Use [PUBLIC_DATASET_ID] for context." if _public_dataset_id else ""
+public_info = ""
 
-# The generated system instruction is written by the setup script next to
-# this module (generated_instruction.md), keeping this module fully static.
-def _read_generated_instruction():
-    _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_instruction.md")
+# The data-asset catalog is written next to this file at deploy time - by
+# scripts/build_data_catalog.py in the Agent Skill path, by a base64 heredoc in
+# the Web UI path - and both produce the same Markdown. It is a FILE and not a
+# literal in this template for one reason: it has to be derived from the CSVs
+# that were actually loaded, so that the row counts and the per-column date
+# ranges in the prompt are the real ones. Several rules above ("the catalog
+# above IS your schema", PATH 0, the no-rediscovery MUSTs) are only true because
+# this file is present; when it is missing the agent still works, it just pays
+# the discovery round trips those rules exist to remove.
+def _load_data_asset_catalog():
+    _path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_assets.md")
     try:
-        with open(_p, encoding="utf-8") as _f:
-            return _f.read()
-    except OSError:
-        return ""
+        with open(_path, "r", encoding="utf-8") as _fh:
+            _txt = _fh.read().strip()
+        if _txt:
+            print("  [CATALOG] Data-asset catalog loaded (%d chars)." % len(_txt))
+            return _txt
+    except FileNotFoundError:
+        pass
+    except Exception as _exc:  # noqa: BLE001 - never block startup on this
+        print("  [CATALOG] Could not read data_assets.md: %s" % _exc)
+    print("  [CATALOG] No data_assets.md; the agent will discover the schema at runtime.")
+    return ("(Not available in this deployment - discover the schema with "
+            "`search_entries` / `get_table_info` before writing SQL.)")
 
-gen_instruction = "\n" + _read_generated_instruction()
 
-# --- Instruction sections for optional toolsets (replaced below) ---
-_custom_mcp_sections = ""
-for _mcp_i, _mcp in enumerate(tools.get_mcp_config()):
-    if _mcp.get("type") == "remote" and _mcp.get("auth_type") == "oauth2_slack":
-        _custom_mcp_sections += (str(4 + _mcp_i) + ". **Slack MCP Toolset**: Search channels & messages, send messages, manage canvases, and access user profiles.\n"
-                                 "   - Available Tools: Dynamically discovered at runtime from Slack MCP Server.\n"
-                                 "   - Use this toolset for queries about Slack messages, channels, users, and canvases.\n")
-    elif _mcp.get("type") == "remote":
-        # Managed remote MCP server. Tool names are prefixed with the server
-        # slug so the model can tell several remote toolsets apart.
-        _rm_name = _mcp.get("name") or "Remote MCP"
-        _rm_caps = ", ".join(_mcp.get("capabilities") or []) or "Dynamically discovered at runtime."
-        _rm_desc = _mcp.get("description") or ("Access data and actions in the " + _rm_name + " MCP server.")
-        _custom_mcp_sections += (str(4 + _mcp_i) + ". **" + _rm_name + " MCP Toolset** (managed remote server at " +
-                                 _mcp.get("endpoint_url", "") + "): " + _rm_desc + "\n"
-                                 "   - Available Tools: " + _rm_caps + "\n"
-                                 "   - Tool names from this server are prefixed with " + _mcp.get("prefix", "") + "_\n"
-                                 "   - Use this toolset for queries that need data or actions inside " + _rm_name + ".\n")
-    else:
-        _custom_mcp_sections += (str(4 + _mcp_i) + ". **Custom MCP Toolset #" + str(_mcp_i + 1) + " (" + _mcp.get("repo_name", "custom") + ")**: Access data in the custom MCP server.\n"
-                                 "   - Available Tools: Dynamically discovered at runtime.\n"
-                                 "   - Use this toolset for queries that require access to external systems, if configured.\n")
+data_asset_catalog = _load_data_asset_catalog()
 
-_dh_workspace_exception = ("""
-EXCEPTION - AUTONOMOUS AGENT WORKSPACE ACTIONS (overrides the lines above):
-delegated autonomous tasks CAN act on the user's Google Workspace with the
-user's own authorization (create REAL Gmail drafts, post Chat messages,
-create Calendar events, save Drive files). When an autonomous task report
-says it created a Gmail draft, that draft ALREADY EXISTS in the user's
-Gmail Drafts folder: present its subject plus this link so the user can
-open it directly: https://mail.google.com/mail/u/0/#drafts
-Do NOT paste the email body as something to copy manually, do NOT label it
-[MANUAL - Draft Only], and do NOT claim email cannot be sent (the
-autonomous agent sends only when the user explicitly asks it to). The
-manual/draft-only rules above still apply to text YOU merely composed
-inline without any Workspace action having been performed.
-""" if (os.environ.get("ENABLE_MANAGED_AGENT") == "1" and (os.environ.get("ENABLE_WORKSPACE_MCP") == "1" or os.environ.get("ENABLE_WORKSPACE_AUTH") == "1")) else "")
+# TEMPLATE PLACEHOLDER - the skill MUST overwrite this whole block.
+#
+# gen_instruction carries the domain-specific business context synthesized in
+# Phase 2 (domain research) for THIS demo: the company profile, the BigQuery
+# table/column semantics, the Firestore task shape, the external files staged
+# on Drive, and the autonomous workflow. Write it in the SAME language the user
+# is conversing in - never hardcode a language here.
+#
+# Keep the five section headings below; replace every bracketed token. Do NOT
+# ship a real customer's context in this file - it is a template.
+gen_instruction = r"""
+=== [COMPANY_NAME] Business Context & Domain Knowledge ===
+You are the "[AGENT_ROLE]" agent for [COMPANY_NAME].
 
-_workspace_mcp_section = ("""
-* **Workspace MCP Toolset**: Access Google Workspace data (Gmail, Drive, Calendar, Chat, People).
-   - Available Tools: Dynamically discovered at runtime.
-   - Use this toolset for queries that require accessing or creating emails, files, calendar events, or chat messages.
-   - GOOGLE CHAT (send_message): Messages can be sent to INTERNAL-ONLY named spaces only. (1) Direct messages (DMs) are NOT supported by the Google Chat API and fail with a permission error. (2) Named spaces that allow external users (externalUserAllowed=true) are BLOCKED by the Chat MCP server and fail with "The caller does not have permission" even though you have access — this is a Chat MCP data-governance guardrail, not a recoverable error, so do NOT retry. IMPORTANT: you CANNOT tell whether a space is internal-only from its name or from search_conversations results — the external-user setting is not exposed there, and space names do NOT necessarily contain words like "internal". So never assume/claim a space is internal-only based on its name, and never silently pick a space hoping it will work. Just attempt the send to the space the user named; if it fails with a permission error, do not assume an auth problem — explain that the target is likely a DM or an external-user-allowed space (which the Chat MCP cannot post to), and ask the user to choose or confirm an internal-only named space (one with external sharing turned OFF). When asked to message a person, send to a named space the user specifies (DMs are unavailable).
-   - A2UI CARDS FOR WORKSPACE (MANDATORY): For Workspace MCP operations you MUST render the matching A2UI card from the example library, never plain text.
-     * WRITE actions: render an EDITABLE compose card FIRST, pre-filled with your proposed values via dataModelUpdate, then WAIT for the user to press Send/Create (the card Button returns the values via sendText). Do NOT call the tool until the user submits the card. Mapping: send_message -> the chat-compose card; create_event / update_event -> the event-compose card; create_draft -> the email-compose card; create_file -> the file-compose card.
-     * CALL EACH WRITE TOOL EXACTLY ONCE per user submission. One Send/Create press = exactly one tool call. NEVER emit the same write call (e.g. send_message) two or three times in the same turn and NEVER issue parallel/duplicate write calls — that creates duplicate messages/events/files. If a write succeeds, do not call it again.
-     * READ results: render the matching list card. chat conversations (search_conversations / list_messages) -> the chat-conversations card; calendar events (list_events) -> the event list card; drive files (search_files / list_recent_files) -> the drive-files card; contacts / directory people (search_contacts / search_directory_people) -> the contacts card.
-     * The editable compose card IS the confirmation step; do NOT additionally ask for confirmation in plain text.
-""" if os.environ.get("ENABLE_WORKSPACE_MCP") == "1" else "")
+# Company profile & lines of business
+[One short paragraph per business line, with the concrete products, standards
+ and counterparties that the demo's data is built around.]
+
+# Reference data structures (BigQuery / Firestore / Google Drive)
+- BigQuery dataset: [DATASET_ID]
+  [For each generated table: table name, one-line purpose, and the columns with
+   their business meaning - the agent uses this instead of guessing from schema.]
+- Firestore collection: [COLLECTION_ID]
+  [The operational task document shape: task_id, title, issue_type, risk_level,
+   current_status, workflow_state, recommended_action.]
+- Google Drive external sample files:
+  [Each staged PDF / Excel / scanned image, with what it contains.]
+
+# Hybrid exploration strategy (domain specifics only)
+[The generic routing rule - fast index first, MCP for aggregates, exact figures
+ and writes - is appended automatically at runtime. Do NOT restate it here.
+ Use this section only for what is specific to THIS domain: which questions in
+ this business are lookups that the index answers well, which reports and
+ specifications are staged in it, and which figures are regulated or contractual
+ and must therefore always be recomputed from the tables rather than quoted from
+ a snippet.]
+
+# Autonomous remediation workflow (SCAN -> RESOLVE -> PRESENT -> EXECUTE -> AUDIT)
+[The domain's detect-and-remediate loop: which anomaly triggers it, what
+ substitution or re-plan the agent proposes, what it writes back after the user
+ approves the A2UI card.]
+"""
 
 import datetime as _ge_real_dt
 _ge_real_today = _ge_real_dt.datetime.now(_ge_real_dt.timezone.utc).strftime("%Y-%m-%d")
 
-instruction = (
-    base_instruction
-    .replace("[PROJECT_ID]", PROJECT_ID)
-    .replace("[DATASET_ID]", _demo_dataset)
-    .replace("[COLLECTION_ID]", _fs_collection)
-    .replace("[REFERENCE_DATE]", _reference_date)
-    .replace("[CURRENT_REAL_DATE]", _ge_real_today)
-    .replace("[PUBLIC_DATASET_INFO]", public_info.replace("[PUBLIC_DATASET_ID]", _public_dataset_id))
-    .replace("[CUSTOM_MCP_SECTIONS]\n", _custom_mcp_sections)
-    .replace("[WORKSPACE_MCP_SECTION]\n", _workspace_mcp_section)
-    .replace("[DH_WORKSPACE_EXCEPTION]\n", _dh_workspace_exception)
+instruction = base_instruction \
+    .replace("[PROJECT_ID]", PROJECT_ID) \
+    .replace("[DATASET_ID]", DATASET_ID) \
+    .replace("[COLLECTION_ID]", COLLECTION_ID) \
+    .replace("[REFERENCE_DATE]", _ge_real_today) \
+    .replace("[CURRENT_REAL_DATE]", _ge_real_today) \
+    .replace("[PUBLIC_DATASET_INFO]", public_info) \
+    .replace("[DATA_ASSET_CATALOG]", data_asset_catalog) \
     .replace("[GENERATED_SYSTEM_INSTRUCTION]", gen_instruction)
+
+# --- Data exploration routing ---
+# Two modes, and BOTH get a routing block. The expensive habit this replaces is
+# not SQL, it is the metadata expedition in front of it: the model opens a
+# figure question with search_entries -> lookup_entry -> get_table_info before
+# the first useful call. The catalog is already in this prompt, so that is three
+# round trips buying nothing, and saying so is what makes MCP mode fast - no
+# index required. v11.77 removed the competing METADATA-FIRST MUST that used to
+# sit 300 lines above this block; two contradictory rules in a 100k-token prompt
+# do not resolve in favour of the later one, they resolve at random, and a live
+# A/B caught the wrong one winning.
+#
+# RAG mode additionally needs the wiring to actually exist. The mode says what
+# was asked for; DEFAULT_DATASTORE_ID / GEMINI_ENTERPRISE_APP_ID say what the
+# deploy managed to wire. Pointing the model at an unbacked search_datastore
+# trades a slow answer for a failed one, so an un-wired rag deployment
+# degrades to the mcp block rather than to nothing.
+_DATA_EXPLORATION_MODE = os.environ.get("DATA_EXPLORATION_MODE", "").strip().lower()
+if not _DATA_EXPLORATION_MODE:
+    # Pre-v11.73 deployments carry the boolean instead.
+    _DATA_EXPLORATION_MODE = (
+        "rag" if os.environ.get("ENABLE_DATASTORE_CONNECTORS", "").lower()
+        in ("true", "1", "yes") else "mcp"
+    )
+_RAG_WIRED = bool(
+    os.environ.get("DEFAULT_DATASTORE_ID", "").strip()
+    or os.environ.get("GEMINI_ENTERPRISE_APP_ID", "").strip()
 )
+
+_ONE_QUERY_RULE = (
+    "ONE QUERY, NOT SEVERAL (MANDATORY). Before calling `execute_sql`, work out every "
+    "figure the answer needs and fetch them ALL in a single statement - conditional "
+    "aggregation, GROUP BY, or UNION ALL across the parts. Budget versus actual for a "
+    "period is ONE query returning budget, actual, variance and variance rate per row, "
+    "never one query per company, per account or per month.\n\n"
+)
+# ADK executes every function call emitted in ONE model turn concurrently
+# (asyncio.gather in google/adk/flows/llm_flows/functions.py), so N independent
+# calls issued together cost one round trip instead of N. Measured on 2026-08-23:
+# across 24 runs of the generated agent, turns == calls in every single one - the
+# model never once batched on its own. This rule exists to make it.
+_PARALLEL_CALLS_RULE = (
+    "SEVERAL CALLS? MAKE THEM IN THE SAME TURN (MANDATORY). One statement cannot always "
+    "cover it - a SQL aggregate plus a Firestore read, a query plus a place lookup, two "
+    "systems that hold different halves of the answer. When the calls do NOT depend on each "
+    "other's results, emit them ALL as function calls in ONE response: calls issued together "
+    "run concurrently, so three of them cost one round trip instead of three. Issuing one, "
+    "waiting for it, then issuing the next is the slowest possible way to ask the same "
+    "questions, and the user sits through every extra wait.\n"
+    "The exception is a real dependency: when call B needs a value only call A's result can "
+    "supply, B waits for the next turn. Never invent A's output to fake a batch.\n\n"
+)
+_NO_NARRATION_RULE = (
+    "Never narrate which path you took and never name the tool to the user - they asked "
+    "a business question, not for a query plan.\n"
+)
+
+if _DATA_EXPLORATION_MODE == "rag" and _RAG_WIRED:
+    instruction += (
+        "\n\n--- RAG-PREFERRED DATA EXPLORATION: SEARCH READS, COMPUTE WITH SQL (MANDATORY) ---\n"
+        "Reads go to the search index first. SQL is for the two things the index cannot "
+        "do - compute a figure, and change a record. Four paths, listed in ascending cost. "
+        "Pick the cheapest one that can actually answer the question asked, and never walk "
+        "further down the list for practice.\n\n"
+        "PATH 0 - ANSWER FROM THIS PROMPT. Zero calls, instant. The data-asset catalog above "
+        "already names every table, every column and its business meaning. Any question about "
+        "WHAT DATA EXISTS or what you are able to analyse is answered from it directly.\n"
+        "PATH 1 - SEARCH (the default for reads): `search_datastore`. One call, typically "
+        "under a second. It searches a single index built over BOTH the structured tables and "
+        "the documents, reports and spreadsheets staged for this demo. For a document it "
+        "returns snippets with citations; for a table row it returns THAT ROW'S OWN STORED "
+        "FIELDS - the record's identifiers, attributes, targets, dates and amounts, ready to "
+        "quote.\n"
+        "PATH 2 - SQL: `execute_sql`. One call. The catalog above IS your schema, so a figure "
+        "question needs no metadata expedition first - write the query and run it.\n"
+        "PATH 3 - CATALOG: `search_entries` / `lookup_entry` / `lookup_context`, then SQL. Two "
+        "extra round trips before the user sees anything.\n\n"
+        "ROUTING:\n"
+        "- \"What data do you have\", \"what can you analyse\" -> PATH 0. Zero tool calls.\n"
+        "- EVERY read that is not a computation -> PATH 1. Lookups by name, id or keyword; "
+        "\"what do we have on X\"; \"find the manual/report/spec covering Y\"; the opening "
+        "exploratory question of a conversation; anything a person would answer by searching "
+        "rather than by calculating.\n"
+        "- NAMED-ENTITY FIRST TOUCH (the bullet most often broken). The user names ONE thing - "
+        "a store, a tenant, a customer, a campaign, a part, a document - and asks an open "
+        "question about it: \"tell me about X\", \"what do we know about X\", \"give me X's "
+        "profile\", \"what can you tell me on X\". That is PATH 1: exactly ONE "
+        "`search_datastore` call, then answer from what comes back. Opening such a turn with "
+        "`execute_sql` is a DEFECT, and it is still a defect when the profile you had in mind "
+        "contains numbers - the record's own stored fields come back in that one call. "
+        "Answer the question that was actually asked: \"tell me about X\" asks who or what X "
+        "is, NOT for a full analytical work-up. Offer the sales trend, the customer mix and "
+        "the ranking as follow-up buttons; run them when the user presses one.\n"
+        "- ANY figure the user will read as a number - an aggregate, a comparison, a variance, "
+        "a ranking, a trend, a filter over a date or numeric range, a join, or any write -> "
+        "PATH 2, directly. Do not stop at PATH 3 on the way.\n"
+        "- PATH 3 ONLY when the question is about the metadata itself, when a column you need "
+        "is not described above, or when `execute_sql` failed and you need the real schema to "
+        "fix it.\n"
+        "- Escalate from PATH 1 the moment the snippets do not actually answer the question. "
+        "Escalating costs one extra call; guessing from a snippet costs the demo.\n\n"
+        + _ONE_QUERY_RULE + _PARALLEL_CALLS_RULE +
+        "TWO HARD RULES:\n"
+        "1. WRITES NEVER USE PATH 1. Every INSERT / UPDATE / DELETE / MERGE and every "
+        "Firestore write goes through the MCP toolsets. `search_datastore` is read-only.\n"
+        "2. DERIVED NUMBERS COME FROM SQL. Anything you COMPUTE - a sum, count, average, "
+        "share, ranking, trend, variance, or any figure spanning more than one record - MUST "
+        "come from `execute_sql` or the Firestore tools, never from a search result. So must "
+        "any record created or changed during this conversation: the index lags the tables, so "
+        "a row written a minute ago may not be indexed yet. A SINGLE named record's own stored "
+        "fields, returned by PATH 1, are the source of record and you may quote them as they "
+        "stand - that is what PATH 1 is for. Use PATH 1 to find WHAT to compute on; use SQL to "
+        "compute it.\n\n"
+        "If `search_datastore` errors or returns nothing, fall back to SQL and answer the "
+        "question. " + _NO_NARRATION_RULE +
+        "--- END RAG-PREFERRED DATA EXPLORATION ---\n"
+    )
+else:
+    instruction += (
+        "\n\n--- DATA EXPLORATION: ANSWER IN ONE CALL (MANDATORY) ---\n"
+        "Three paths, listed in ascending cost. Pick the cheapest one that can actually "
+        "answer the question asked, and never walk further down the list for practice.\n\n"
+        "PATH 0 - ANSWER FROM THIS PROMPT. Zero calls, instant. The data-asset catalog above "
+        "already names every table, every column and its business meaning. Any question about "
+        "WHAT DATA EXISTS or what you are able to analyse is answered from it directly.\n"
+        "PATH 1 - SQL: `execute_sql`. One call. The catalog above IS your schema, so a figure "
+        "question needs no metadata expedition first - write the query and run it.\n"
+        "PATH 2 - CATALOG: `search_entries` / `lookup_entry` / `lookup_context`, then SQL. Two "
+        "extra round trips before the user sees anything.\n\n"
+        "ROUTING:\n"
+        "- \"What data do you have\", \"what can you analyse\" -> PATH 0. Zero tool calls.\n"
+        "- EVERYTHING that touches actual records - a lookup by name or id, a profile, an "
+        "aggregate, a comparison, a ranking, a trend, a filter over a date or numeric range, "
+        "a join, or any write -> PATH 1, directly. Do not stop at PATH 2 on the way.\n"
+        "- PATH 2 ONLY when the question is about the metadata itself, when a column you need "
+        "is not described above, or when `execute_sql` failed and you need the real schema to "
+        "fix it.\n\n"
+        + _ONE_QUERY_RULE + _PARALLEL_CALLS_RULE +
+        "ANSWER THE QUESTION THAT WAS ASKED. \"Tell me about X\" asks who or what X is - ONE "
+        "query for that record's own row, NOT a full analytical work-up. Offer the sales "
+        "trend, the customer mix and the ranking as follow-up buttons; run them when the user "
+        "presses one.\n\n"
+        + _NO_NARRATION_RULE +
+        "--- END DATA EXPLORATION ---\n"
+    )
 
 # --- Conditional Data Viewer integration ---
 _viewer_url = os.environ.get("DATA_VIEWER_URL", "")
@@ -711,7 +931,7 @@ if _viewer_url:
         "2. After bulk or high-impact actions: emphasize dashboard KPIs and include the Markdown link.\n"
         "3. In confirmation cards: include [View changes live](" + _viewer_url + ") as clickable inline text.\n"
         "4. In the Welcome Card (MANDATORY):\n"
-        "   Include an Icon (name: home) + Text row. The Text literalString MUST contain:\n"
+        "   Include a MaterialIcon (icon: home) + MaterialText row. The MaterialText text MUST contain:\n"
         "   Real-time Operations Console - Monitor live operational data: [Open Dashboard](" + _viewer_url + ")\n"
         "   Do NOT use a Button. Use inline Markdown link text only.\n\n"
         "WHEN NOT TO SHOW:\n"
@@ -746,6 +966,11 @@ if os.environ.get("DASHBOARDS_BUCKET", ""):
         "ALONGSIDE, but you MUST still call publish_dashboard and deliver the link.\n\n"
         "(A plain 'overview / snapshot / current numbers' request WITHOUT an interactive/"
         "open-in-browser signal is still a fast inline card - do not publish a page for it.)\n\n"
+        "INLINE DASHBOARDS (A2UI - NO IFRAMES): if the user asks for a dashboard IN THE "
+        "CHAT (no interactive/open-in-browser signal), render a native A2UI v0.9 dashboard "
+        "card (MaterialCard + MaterialTabs + KPI MaterialRow + MaterialTable + VegaChart). "
+        "NEVER emit IFrameSrcdoc or IFrameUrl — they are FORBIDDEN and render as blank 0px "
+        "boxes in Gemini Enterprise.\n\n"
         "EXECUTION DISCIPLINE (CRITICAL - PREVENTS DEAD-END TURNS):\n"
         "- Your VERY FIRST action for a dashboard request MUST be an actual tool call "
         "(execute_sql / execute_sql_readonly to gather the numbers). Do NOT reply with only a "
@@ -790,7 +1015,7 @@ if os.environ.get("DASHBOARDS_BUCKET", ""):
         "Present the returned dashboard_url using Markdown link syntax ONLY:\n"
         "  RIGHT: [Open Executive Dashboard](DASHBOARD_URL)\n"
         "  WRONG (plain URL): DASHBOARD_URL\n"
-        "  WRONG (button): an A2UI/openUrl button (openUrl is NOT supported in A2UI v0.8)\n"
+        "  WRONG (button): an A2UI/openUrl button (there is no openUrl action in the A2UI catalog)\n"
         "Always use [link text](URL) format. NEVER output a bare URL.\n\n"
         "CRITICAL RULES:\n"
         "- Use the dashboard_url returned by the tool VERBATIM. NEVER invent or modify it.\n"
@@ -800,20 +1025,18 @@ if os.environ.get("DASHBOARDS_BUCKET", ""):
         "--- END INTERACTIVE DASHBOARD ---\n"
     )
 
-if os.environ.get("ENABLE_COMPUTER_USE") == "1":
-    # --- Computer Use (browser agent) routing ---
-    instruction += (
-        "\n\n--- COMPUTER USE (BROWSER AGENT) ---\n"
-        "You have a real web browser tool (computer_use_browse) to accomplish tasks on websites "
-        "that have NO API or MCP tool: legacy/supplier/partner portals, competitor public pages, "
-        "government or regulatory sites, public data sources, and internal web apps. Use it for "
-        "'search google.com and ...', 'go to <site> and ...', 'check the price/status on "
-        "<website>', web research, form filling, and cross-site knowledge work.\n"
-        "CRITICAL: the browser tool is REAL and available. NEVER claim you cannot access external "
-        "sites, and NEVER say live crawling is blocked/restricted by a secure or isolated "
-        "environment - that is false. When the user asks to look something up on the web, USE the "
-        "browser instead of answering from internal data or refusing.\n"
-    + ((
+# --- Computer Use (browser agent) routing ---
+instruction += (
+    "\n\n--- COMPUTER USE (BROWSER AGENT) ---\n"
+    "You have a real web browser tool (computer_use_browse) to accomplish tasks on websites "
+    "that have NO API or MCP tool: legacy/supplier/partner portals, competitor public pages, "
+    "government or regulatory sites, public data sources, and internal web apps. Use it for "
+    "'search google.com and ...', 'go to <site> and ...', 'check the price/status on "
+    "<website>', web research, form filling, and cross-site knowledge work.\n"
+    "CRITICAL: the browser tool is REAL and available. NEVER claim you cannot access external "
+    "sites, and NEVER say live crawling is blocked/restricted by a secure or isolated "
+    "environment - that is false. When the user asks to look something up on the web, USE the "
+    "browser instead of answering from internal data or refusing.\n"
     "BROWSER vs AUTONOMOUS AGENT: the autonomous agent (delegate_autonomous_task) reads "
     "web pages programmatically and has NO interactive browser. Tasks whose PRIMARY goal is "
     "operating a site - clicking, typing, filling forms, working a portal, or a browse the "
@@ -828,50 +1051,48 @@ if os.environ.get("ENABLE_COMPUTER_USE") == "1":
     "COMPOSITE job the order is: short focused browse FIRST (live-view link shown), then "
     "delegate_autonomous_task in the SAME turn with the browse result_summary inside "
     "input_data labeled 'BROWSER FINDINGS (gathered live from <url>):'.\n"
-    ) if os.environ.get("ENABLE_MANAGED_AGENT") == "1" else "") +
-    "" +
-        "SEARCH & CAPTCHA TIPS (IMPORTANT - saves steps):\n"
-        "- Do NOT open google.com and type in its search box: Google shows a CAPTCHA / bot wall to "
-        "automated browsers and wastes many steps. Instead, set start_url so the browser opens "
-        "STRAIGHT onto results or the source: use a DuckDuckGo results URL "
-        "'https://duckduckgo.com/html/?q=<url-encoded terms>' (automation-friendly, no CAPTCHA), or "
-        "navigate directly to the known authoritative site when you can guess it.\n"
-        "- If a page shows a CAPTCHA or 'unusual traffic' / bot check, switch to the DuckDuckGo "
-        "results URL ONCE and continue. Do NOT keep switching between search engines - that is what "
-        "burns the step budget.\n"
-        "- Put the full query directly in the start_url so you land on results in 1 step instead of "
-        "clicking into a search box.\n"
-        "HOW TO CHOOSE (INLINE vs BACKGROUND):\n"
-        "- QUICK look-ups (a single site, a few clicks - e.g. 'search google for today's USD/JPY', "
-        "'check the weather on <site>'): run INLINE using this EXACT 2-step sequence so the user can "
-        "watch it live:\n"
-        "    STEP 1 - call start_browser_session (no arguments). It returns session_id and "
-        "live_view_url INSTANTLY.\n"
-        "    STEP 2 - if live_view_url is non-empty, output a short progress line that INCLUDES the "
-        "live-view Markdown link, e.g. 'Opening the browser... Watch it live: "
-        "[Watch Browser Session](<live_view_url>)'. Then call computer_use_browse with the goal, the "
-        "start_url, AND session_id set to the session_id from STEP 1 (so the link matches the run). "
-        "If live_view_url is empty (no Data Viewer deployed), skip the link and just call "
-        "computer_use_browse - the browser screenshots still stream into THIS chat automatically.\n"
-        "  You MUST show the link BEFORE calling computer_use_browse, because that call blocks until "
-        "the browser finishes - showing it after is too late to watch live. The result_summary is "
-        "your answer. Inline is capped (about 30 steps / 4 minutes of browsing). If it returns "
-        "status 'partial' and browsing WAS the user's primary ask, do NOT stop there: in the SAME "
-        "turn call register_background_task with a task_prompt that CONTINUES the browse via "
-        "computer_use_browse from where it left off (background runs get a much larger step "
-        "budget), present what was already found, and tell the user the deeper browse continues "
-        "in the background. If the browse was a pre-browse feeding a delegation, pass the partial "
-        "findings on per the PRE-BROWSE rule instead.\n"
-        "- LONG or multi-page jobs (deep audits, many pages, monitoring): use register_background_task "
-        "with a task_prompt that instructs the background agent to use computer_use_browse. Its result "
-        "includes a live_view_url; surface it the same Markdown-link way.\n"
-        "LIVE-VIEW LINK RULES: always render it as a Markdown link on its own line - "
-        "[Watch Browser Session](<live_view_url>) - copying the URL from the tool result verbatim. "
-        "NEVER invent the URL, NEVER output a bare URL, and NEVER use an A2UI/openUrl button (openUrl "
-        "is not supported in A2UI v0.8) - Markdown link text only. If there is no live_view_url, rely "
-        "on the in-chat screenshots.\n"
-        "--- END COMPUTER USE ---\n"
-    )
+    "SEARCH & CAPTCHA TIPS (IMPORTANT - saves steps):\n"
+    "- Do NOT open google.com and type in its search box: Google shows a CAPTCHA / bot wall to "
+    "automated browsers and wastes many steps. Instead, set start_url so the browser opens "
+    "STRAIGHT onto results or the source: use a DuckDuckGo results URL "
+    "'https://duckduckgo.com/html/?q=<url-encoded terms>' (automation-friendly, no CAPTCHA), or "
+    "navigate directly to the known authoritative site when you can guess it.\n"
+    "- If a page shows a CAPTCHA or 'unusual traffic' / bot check, switch to the DuckDuckGo "
+    "results URL ONCE and continue. Do NOT keep switching between search engines - that is what "
+    "burns the step budget.\n"
+    "- Put the full query directly in the start_url so you land on results in 1 step instead of "
+    "clicking into a search box.\n"
+    "HOW TO CHOOSE (INLINE vs BACKGROUND):\n"
+    "- QUICK look-ups (a single site, a few clicks - e.g. 'search google for today's USD/JPY', "
+    "'check the weather on <site>'): run INLINE using this EXACT 2-step sequence so the user can "
+    "watch it live:\n"
+    "    STEP 1 - call start_browser_session (no arguments). It returns session_id and "
+    "live_view_url INSTANTLY.\n"
+    "    STEP 2 - if live_view_url is non-empty, output a short progress line that INCLUDES the "
+    "live-view Markdown link, e.g. 'Opening the browser... Watch it live: "
+    "[Watch Browser Session](<live_view_url>)'. Then call computer_use_browse with the goal, the "
+    "start_url, AND session_id set to the session_id from STEP 1 (so the link matches the run). "
+    "If live_view_url is empty (no Data Viewer deployed), skip the link and just call "
+    "computer_use_browse - the browser screenshots still stream into THIS chat automatically.\n"
+    "  You MUST show the link BEFORE calling computer_use_browse, because that call blocks until "
+    "the browser finishes - showing it after is too late to watch live. The result_summary is "
+    "your answer. Inline is capped (about 30 steps / 4 minutes of browsing). If it returns "
+    "status 'partial' and browsing WAS the user's primary ask, do NOT stop there: in the SAME "
+    "turn call register_background_task with a task_prompt that CONTINUES the browse via "
+    "computer_use_browse from where it left off (background runs get a much larger step "
+    "budget), present what was already found, and tell the user the deeper browse continues "
+    "in the background. If the browse was a pre-browse feeding a delegation, pass the partial "
+    "findings on per the PRE-BROWSE rule instead.\n"
+    "- LONG or multi-page jobs (deep audits, many pages, monitoring): use register_background_task "
+    "with a task_prompt that instructs the background agent to use computer_use_browse. Its result "
+    "includes a live_view_url; surface it the same Markdown-link way.\n"
+    "LIVE-VIEW LINK RULES: always render it as a Markdown link on its own line - "
+    "[Watch Browser Session](<live_view_url>) - copying the URL from the tool result verbatim. "
+    "NEVER invent the URL, NEVER output a bare URL, and NEVER use an A2UI/openUrl button (there "
+    "is no openUrl action in the A2UI catalog) - Markdown link text only. If there is no live_view_url, rely "
+    "on the in-chat screenshots.\n"
+    "--- END COMPUTER USE ---\n"
+)
 
 
 # === EXECUTION & RESULT PRESENTATION REMINDER (must be last for recency bias) ===
@@ -903,14 +1124,45 @@ instruction += (
     "=== END DATABASE WRITE RULES ===\n"
 )
 
+# --- MaterialTabs reachability shim (must precede generate_system_prompt) ---
+# a2ui.schema.validator.get_refs_recursively follows {"...": "<id>"} entries via
+# a 'child' key inside nested arrays, but a MaterialTabs tab is {label, content}.
+# Without this, analyze_topology() reports every component referenced ONLY from a
+# tab as "not reachable from 'root'". Here that is fatal, not cosmetic: this
+# module runs generate_system_prompt(validate_examples=True) at IMPORT time, and
+# adk_agent/app/__init__.py imports it first, so a tabbed example crashes the
+# container before fast_api_app.py (which installs the same shim) is ever loaded.
+# Keep this identical to the copies in fast_api_app.py and validate_examples.py.
+# No-op once upstream handles 'content' itself.
+try:
+    import a2ui.schema.validator as _a2ui_validator_mod
+    _a2ui_orig_get_refs = _a2ui_validator_mod.get_refs_recursively
+
+    def _a2ui_get_refs_with_tab_content(_comp_type_name, _props, _ref_fields_map):
+        for _pair in _a2ui_orig_get_refs(_comp_type_name, _props, _ref_fields_map):
+            yield _pair
+        for _key, _value in (_props or {}).items():
+            if isinstance(_value, list):
+                for _idx, _item in enumerate(_value):
+                    if isinstance(_item, dict) and isinstance(_item.get('content'), str):
+                        yield _item['content'], _key + '[' + str(_idx) + '].content'
+
+    _a2ui_validator_mod.get_refs_recursively = _a2ui_get_refs_with_tab_content
+except Exception as _shim_err:
+    print('[a2ui] MaterialTabs reachability shim not installed: ' + str(_shim_err))
+
 schema_manager = A2uiSchemaManager(
-    version=VERSION_0_8,
+    version=VERSION_0_9,
     catalogs=[
-        BasicCatalog.get_config(
-            version=VERSION_0_8,
-            examples_path="adk_agent/app/examples/0.8"
+        CatalogConfig.from_path(
+            name="ge_composite",
+            catalog_path=A2UI_COMPOSITE_CATALOG_PATH,
+            examples_path=A2UI_EXAMPLES_PATH,
         )
     ],
+    # The composite catalog composes components with allOf + unevaluatedProperties;
+    # without this the generated schema over-rejects otherwise valid surfaces.
+    schema_modifiers=[remove_strict_validation],
 )
 
 final_instruction = schema_manager.generate_system_prompt(
@@ -920,6 +1172,20 @@ final_instruction = schema_manager.generate_system_prompt(
     include_examples=True,
     validate_examples=True,
 )
+
+# ADK treats a plain-STRING instruction as a template: inject_session_state
+# raises KeyError on any brace-wrapped identifier it cannot resolve from
+# session state. The composite catalog embedded above contains a literal
+# '{expression}' token inside a component description (the dynamic-string
+# docs), which made EVERY turn die before the model ran with
+# KeyError: Context variable not found: 'expression'. An InstructionProvider
+# (a callable) sets bypass_state_injection=True, so the schema-bearing
+# instruction is never templated. root_agent is the one agent that USES a
+# state variable ({_bg_task_results}) - its provider substitutes it manually.
+def _static_instruction(_text):
+    def _provider(_ctx):
+        return _text
+    return _provider
 
 # Configure models with automatic retries for 429/5xx errors
 _RETRY_OPTIONS = types.HttpRetryOptions(
@@ -932,13 +1198,13 @@ _RETRY_OPTIONS = types.HttpRetryOptions(
 
 # Pro model — used by deep_analysis_agent for complex multi-step reasoning
 gemini_pro_model = Gemini(
-    model=os.environ.get("AGENT_MODEL", "gemini-3.6-flash"),
+    model=os.environ.get("AGENT_MODEL", "gemini-3.8-flash"),
     retry_options=_RETRY_OPTIONS
 )
 
 # Flash-Lite model — used by root_agent (coordinator) for most interactions
 gemini_lite_model = Gemini(
-    model=os.environ.get("AGENT_MODEL_LITE", "gemini-3.6-flash"),
+    model=os.environ.get("AGENT_MODEL_LITE", "gemini-3.8-flash"),
     retry_options=_RETRY_OPTIONS
 )
 
@@ -1079,14 +1345,25 @@ def _strip_part_metadata(callback_context, llm_request):
     return None
 
 # --- Shared tools list ---
-_all_tools = [maps_toolset, bigquery_toolset, firestore_toolset, knowledge_catalog_toolset, tools.generate_image, slack_mcp_toolset] + custom_mcp_toolsets + remote_mcp_toolsets
-if os.environ.get("ENABLE_WORKSPACE_MCP") == "1":
-    _all_tools += [tools.get_gmail_mcp_toolset(), tools.get_drive_mcp_toolset(), tools.get_calendar_mcp_toolset(), tools.get_chat_mcp_toolset(), tools.get_people_mcp_toolset()]
-_all_tools = [t for t in _all_tools if t is not None]
+_ws_tools = []
+if os.environ.get("ENABLE_WORKSPACE_MCP", "").lower() in ("true", "1", "yes"):
+    _ws_tools = [
+        tools.get_gmail_mcp_toolset(),
+        tools.get_drive_mcp_toolset(),
+        tools.get_calendar_mcp_toolset(),
+        tools.get_chat_mcp_toolset(),
+        tools.get_people_mcp_toolset(),
+    ]
+_all_tools = [t for t in [maps_toolset, bigquery_toolset, firestore_toolset, knowledge_catalog_toolset, tools.generate_image, slack_mcp_toolset] + custom_mcp_toolsets + remote_mcp_toolsets + _ws_tools if t is not None]
 
 _all_tools.append(tools.write_operational_alert)
 _all_tools.append(tools.save_document_to_db)
 _all_tools.append(tools.publish_dashboard)
+# Only offered in rag mode, and only once the index is actually wired. A tool the
+# model can see is a tool it will eventually try, and in mcp mode every such call
+# is a wasted round trip that ends in an error.
+if _DATA_EXPLORATION_MODE == "rag" and _RAG_WIRED:
+    _all_tools.append(tools.search_datastore)
 
 # --- Background task management tools ---
 _all_tools.append(tools.background_task_tool)
@@ -1098,34 +1375,57 @@ _all_tools.append(tools.register_scheduled_task)
 _all_tools.append(tools.update_scheduled_task)
 _all_tools.append(tools.delete_scheduled_task)
 _all_tools.append(tools.run_scheduled_task_now)
-if os.environ.get("ENABLE_COMPUTER_USE") == "1":
-    # Computer Use is available BOTH inline (root/deep_analysis, capped short) and in
-    # background tasks. Inline is what makes the browser screenshots stream into the chat
-    # via inject_image_callback (same path as generate_image). start_browser_session lets
-    # the agent obtain a live-view link BEFORE the (blocking) inline browse call.
-    _all_tools.append(tools.start_browser_session)
-    _all_tools.append(tools.computer_use_browse)
-if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
-    # Managed Autonomous Agent (Antigravity) delegation. Background workers are
-    # blocked by a structural guard in tools.py; deep_analysis_agent is ALLOWED
-    # to delegate (v11.2) so a mis-routed web/file/Workspace task has an escape
-    # hatch instead of a dead end - the tool always returns within the sync
-    # window, so the F1 hang pattern does not apply.
-    _all_tools.append(tools.delegate_autonomous_task)
-    _all_tools.append(tools.get_autonomous_task_status)
-    # Recurring autonomous schedules (v11.33): Cloud Scheduler fires
-    # /execute_task, which delegates to the sandbox headlessly.
-    _all_tools.append(tools.register_scheduled_autonomous_task)
-if (os.environ.get("ENABLE_MANAGED_AGENT") == "1" and (os.environ.get("ENABLE_WORKSPACE_MCP") == "1" or os.environ.get("ENABLE_WORKSPACE_AUTH") == "1")):
-    # Drive handoff needs BOTH the user's Workspace OAuth (drive.file) and the
-    # Managed Agent deliverables in GCS.
-    _all_tools.append(tools.save_deliverables_to_drive)
+# Computer Use is available BOTH inline (root/deep_analysis, capped short) and in
+# background tasks. Inline is what makes the browser screenshots stream into the chat
+# via inject_image_callback (same path as generate_image). start_browser_session lets
+# the agent obtain a live-view link BEFORE the (blocking) inline browse call.
+_all_tools.append(tools.start_browser_session)
+_all_tools.append(tools.computer_use_browse)
+# Managed Autonomous Agent (Antigravity) delegation & Workspace Drive handoff.
+# Background workers are blocked by a structural guard in tools.py; deep_analysis_agent
+# is ALLOWED to delegate (v11.2) so a mis-routed web/file/Workspace task has an escape
+# hatch instead of a dead end - the tool always returns within the sync window, so the
+# F1 hang pattern does not apply.
+for _tool_name in (
+    "delegate_autonomous_task",
+    "get_autonomous_task_status",
+    "register_scheduled_autonomous_task",
+    "save_deliverables_to_drive",
+):
+    _tool = getattr(tools, _tool_name, None)
+    if _tool is not None:
+        _all_tools.append(_tool)
+
 
 
 # --- Agent Sandbox Code Executor (always enabled) ---
-_code_executor = AgentEngineSandboxCodeExecutor(
-    sandbox_resource_name=os.environ.get("SANDBOX_RESOURCE_NAME", ""),
-)
+# =============================================================================
+# Lever D: Lazy AgentEngine Sandbox Code Executor (BaseCodeExecutor Subclass)
+# =============================================================================
+class _LazyAgentEngineCodeExecutor(BaseCodeExecutor):
+    sandbox_resource_name: str
+    _executor: Any = PrivateAttr(default=None)
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    def _init_executor(self):
+        if self._executor is None:
+            with self._lock:
+                if self._executor is None:
+                    from google.adk.code_executors.agent_engine_sandbox_code_executor import (
+                        AgentEngineSandboxCodeExecutor,
+                    )
+                    self._executor = AgentEngineSandboxCodeExecutor(
+                        sandbox_resource_name=self.sandbox_resource_name
+                    )
+        return self._executor
+
+    def execute_code(self, invocation_context, code_execution_input):
+        return self._init_executor().execute_code(invocation_context, code_execution_input)
+
+_sandbox_res = os.environ.get("SANDBOX_RESOURCE_NAME", "").strip()
+_code_executor = _LazyAgentEngineCodeExecutor(
+    sandbox_resource_name=_sandbox_res
+) if _sandbox_res else None
 
 # --- Before-Agent Callback: Inject completed background task results ---
 # A 'working' task doc this far past its last heartbeat is abandoned. The
@@ -1162,11 +1462,10 @@ def _inject_completed_tasks(callback_context):
             # the /execute_task and non-A2A paths; it costs nothing when the
             # entry sweep already refreshed the heartbeat.
             if _wd.get("interaction_id"):
-                if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
-                    try:
-                        tools._ma_recover_orphaned_task(_wdoc.reference, _wd, False)
-                    except Exception:
-                        pass
+                try:
+                    tools._ma_recover_orphaned_task(_wdoc.reference, _wd, False)
+                except Exception:
+                    pass
                 continue
             # Abandoned worker run: /execute_task heartbeats updated_at every
             # ~30s for as long as it is alive. Silence far past that means the
@@ -1211,10 +1510,28 @@ def _inject_completed_tasks(callback_context):
         for _doc in _docs:
             _d = _doc.to_dict()
             _status_icon = "completed" if _d.get("status") == "completed" else "failed"
-            _summaries.append(
-                "[" + _status_icon.upper() + "] Task '" + _d.get("task_id", "") + "': "
-                + _d.get("result_summary", "")[:300]
-            )
+            _entry = ("[" + _status_icon.upper() + "] Task '" + _d.get("task_id", "") + "': "
+                      + _d.get("result_summary", "")[:300])
+            # The excerpt is truncated at 300 chars, so the link block that
+            # completion appends to result_summary never survives into this
+            # announcement - and those signatures would be stale by now anyway.
+            # Re-list storage and attach fresh links, or the first thing the
+            # user hears about a finished task is that it finished, with no way
+            # to open what it produced (v11.62). deliver_tid, not task_id: an
+            # upload-only follow-up writes into the ORIGINAL ticket's prefix.
+            _collect = getattr(tools, "_ma_collect_deliverables", None)
+            if _collect is not None and _d.get("status") == "completed":
+                try:
+                    _dl_links = _collect(_d.get("deliver_tid") or _d.get("task_id", ""))
+                except Exception:
+                    _dl_links = []
+                if _dl_links:
+                    _entry = (_entry + chr(10)
+                              + "DELIVERABLE DOWNLOADS for this task (freshly signed, valid 7 days). "
+                                "You MUST reproduce EVERY link below verbatim as markdown links "
+                                "whenever you tell the user this task finished - the user cannot see "
+                                "this block:" + chr(10) + chr(10).join(_dl_links))
+            _summaries.append(_entry)
             _doc.reference.update({"reported_to_user": True})
         if _summaries:
             _msg = "--- BACKGROUND TASK RESULTS ---" + chr(10) + chr(10).join(_summaries) + chr(10) + "--- END RESULTS ---"
@@ -1222,48 +1539,47 @@ def _inject_completed_tasks(callback_context):
             callback_context.state["_bg_task_results"] = _msg
         else:
             callback_context.state["_bg_task_results"] = ""
-        if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
 
-            # Managed Agent UX: ALSO surface still-running tasks in the same
-            # injected block, so the model can weave a one-line progress mention
-            # into otherwise unrelated turns (running != completed; the
-            # instruction block explains how to phrase it).
-            try:
-                _running_docs = _fs.collection(_demo_id + "_task_executions").where(
-                    "status", "in", ["working", "submitted"]
-                ).limit(3).stream()
-                _rlines = []
-                for _rdoc in _running_docs:
-                    _rd = _rdoc.to_dict()
-                    _tail_lines = [_l for _l in (_rd.get("log_tail", "") or "").split(chr(10)) if _l.strip()]
-                    _last_line = _tail_lines[-1][-140:] if _tail_lines else ""
-                    # Honest progress (v11.32): lead with elapsed time + monitor
-                    # liveness; the percentage is an activity estimate capped at
-                    # 90 and must not be read as a completion fraction.
-                    _age_bits = []
-                    try:
-                        import datetime as _dt
-                        _now = _dt.datetime.now(_dt.timezone.utc)
-                        _rstarted = tools._ma_parse_iso_utc(_rd.get("started_at"))
-                        if _rstarted is not None:
-                            _age_bits.append(str(int((_now - _rstarted).total_seconds() / 60)) + " min elapsed")
-                        _rbeat = tools._ma_parse_iso_utc(_rd.get("updated_at"))
-                        if _rbeat is not None:
-                            _age_bits.append("last activity " + str(int((_now - _rbeat).total_seconds() / 60)) + " min ago")
-                    except Exception:
-                        pass
-                    _age_txt = (" (" + ", ".join(_age_bits) + ")") if _age_bits else ""
-                    _rlines.append("Task '" + _rd.get("task_id", "") + "' still running" + _age_txt + ": "
-                                   + str(_rd.get("progress_pct", 0)) + "% - " + _last_line)
-                if _rlines:
-                    _prev = callback_context.state.get("_bg_task_results", "") or ""
-                    _rmsg = ("--- TASKS STILL RUNNING (progress info, NOT completed; the percentage is an "
-                             "activity estimate CAPPED at 90, not a completion fraction - when mentioning "
-                             "progress, lead with elapsed time / latest activity and never say 'almost done' "
-                             "from the number) ---" + chr(10) + chr(10).join(_rlines) + chr(10) + "--- END RUNNING ---")
-                    callback_context.state["_bg_task_results"] = (_prev + chr(10) + _rmsg).strip()
-            except Exception:
-                pass
+        # Managed Agent UX: ALSO surface still-running tasks in the same
+        # injected block, so the model can weave a one-line progress mention
+        # into otherwise unrelated turns (running != completed; the
+        # instruction block explains how to phrase it).
+        try:
+            _running_docs = _fs.collection(_demo_id + "_task_executions").where(
+                "status", "in", ["working", "submitted"]
+            ).limit(3).stream()
+            _rlines = []
+            for _rdoc in _running_docs:
+                _rd = _rdoc.to_dict()
+                _tail_lines = [_l for _l in (_rd.get("log_tail", "") or "").split(chr(10)) if _l.strip()]
+                _last_line = _tail_lines[-1][-140:] if _tail_lines else ""
+                # Honest progress (v11.32): lead with elapsed time + monitor
+                # liveness; the percentage is an activity estimate capped at
+                # 90 and must not be read as a completion fraction.
+                _age_bits = []
+                try:
+                    import datetime as _dt
+                    _now = _dt.datetime.now(_dt.timezone.utc)
+                    _rstarted = tools._ma_parse_iso_utc(_rd.get("started_at"))
+                    if _rstarted is not None:
+                        _age_bits.append(str(int((_now - _rstarted).total_seconds() / 60)) + " min elapsed")
+                    _rbeat = tools._ma_parse_iso_utc(_rd.get("updated_at"))
+                    if _rbeat is not None:
+                        _age_bits.append("last activity " + str(int((_now - _rbeat).total_seconds() / 60)) + " min ago")
+                except Exception:
+                    pass
+                _age_txt = (" (" + ", ".join(_age_bits) + ")") if _age_bits else ""
+                _rlines.append("Task '" + _rd.get("task_id", "") + "' still running" + _age_txt + ": "
+                               + str(_rd.get("progress_pct", 0)) + "% - " + _last_line)
+            if _rlines:
+                _prev = callback_context.state.get("_bg_task_results", "") or ""
+                _rmsg = ("--- TASKS STILL RUNNING (progress info, NOT completed; the percentage is an "
+                         "activity estimate CAPPED at 90, not a completion fraction - when mentioning "
+                         "progress, lead with elapsed time / latest activity and never say 'almost done' "
+                         "from the number) ---" + chr(10) + chr(10).join(_rlines) + chr(10) + "--- END RUNNING ---")
+                callback_context.state["_bg_task_results"] = (_prev + chr(10) + _rmsg).strip()
+        except Exception:
+            pass
 
     except Exception as _e:
         _logging.error("Failed to inject task results: " + str(_e))
@@ -1315,13 +1631,11 @@ INLINE_TOOL_DEADLINE = _itb_contextvars.ContextVar('inline_tool_deadline', defau
 # inline result (confirmed: image at +74s -> overran 115s). Blocking it after
 # this earlier cutoff reserves time for the headline compute + report synthesis.
 INLINE_IMAGE_DEADLINE = _itb_contextvars.ContextVar('inline_image_deadline', default=None)
-_INLINE_GATE_EXEMPT_TOOLS = frozenset(('transfer_to_agent', 'register_background_task', 'computer_use_browse', 'start_browser_session', 'publish_dashboard'))
-if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
-    # delegate_autonomous_task is exempt (v11.8): it always returns within its
-    # ~30s sync window and ends the turn cleanly, and it must stay callable after
-    # a long pre-browse (computer_use_browse can legitimately consume most of the
-    # inline budget before a composite task is delegated).
-    _INLINE_GATE_EXEMPT_TOOLS = _INLINE_GATE_EXEMPT_TOOLS | frozenset(('delegate_autonomous_task',))
+_INLINE_GATE_EXEMPT_TOOLS = frozenset(('transfer_to_agent', 'register_background_task', 'computer_use_browse', 'start_browser_session', 'publish_dashboard', 'delegate_autonomous_task'))
+# delegate_autonomous_task is exempt (v11.8): it always returns within its
+# ~30s sync window and ends the turn cleanly, and it must stay callable after
+# a long pre-browse (computer_use_browse can legitimately consume most of the
+# inline budget before a composite task is delegated).
 
 
 def _inline_tool_budget_gate(tool, args, tool_context):
@@ -1417,6 +1731,272 @@ def _dedup_workspace_writes(tool, args, tool_context):
                        'the user and do NOT retry.',
         }
     return None
+
+# =============================================================================
+# BigQuery scope + SQL error-recovery gate
+# =============================================================================
+# Two failures observed in one diagnostic run on 2026-08-23, both of which the
+# instruction already forbade in words and neither of which the words prevented:
+#
+#   1. DATASET ISOLATION was ignored. With its own dataset returning "Not found",
+#      the agent went looking around the project and answered the user from
+#      THREE other demos' datasets - demo_shelf_inventory_*, demo_smart_shelf_*,
+#      demo_coffee_retail_* - presenting another demo's numbers as this demo's.
+#      It also read `region-us.INFORMATION_SCHEMA`, which is project-wide.
+#   2. There is no cap on SQL error recovery. The same run burned more than ten
+#      model round trips re-attempting variations of a query that could not
+#      succeed, roughly a minute and a half of silence in front of the user,
+#      and never told them anything was wrong.
+#
+# A rule in a 100k-token prompt is a suggestion. These are the enforcement.
+import re as _ge_re
+
+_BQ_SQL_TOOLS = frozenset(('execute_sql', 'execute_sql_readonly', 'query',
+                           'run_query', 'execute_query'))
+# Only identifiers in table position are inspected. Matching every dotted token
+# in the statement would trip over struct field access (`t.address.city`) and
+# string literals, and a false positive here does not slow a demo down, it
+# breaks it.
+_BQ_REF_TOKEN = r'(?:`[^`]+`|[A-Za-z_][\w\-]*)'
+_BQ_REF_AT_RE = _ge_re.compile(
+    r'\s*(' + _BQ_REF_TOKEN + r'(?:\s*\.\s*' + _BQ_REF_TOKEN + r')*)')
+_BQ_KEYWORD_RE = _ge_re.compile(r'\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\b',
+                                _ge_re.IGNORECASE)
+_BQ_ALIAS_RE = _ge_re.compile(r'\s*(?:AS\s+)?([A-Za-z_]\w*)', _ge_re.IGNORECASE)
+_BQ_COMMA_RE = _ge_re.compile(r'\s*,')
+# Words that can follow a table reference but are never its alias. Consuming one
+# as an alias would let the scan walk past the end of the FROM clause.
+_BQ_NOT_AN_ALIAS = frozenset((
+    'ON', 'USING', 'WHERE', 'GROUP', 'ORDER', 'HAVING', 'LIMIT', 'OFFSET',
+    'WINDOW', 'QUALIFY', 'UNION', 'INTERSECT', 'EXCEPT', 'JOIN', 'INNER',
+    'LEFT', 'RIGHT', 'FULL', 'CROSS', 'SELECT', 'SET', 'VALUES', 'WITH',
+    'TABLESAMPLE', 'PIVOT', 'UNPIVOT', 'FOR', 'WHEN', 'USE'))
+# Comments and string literals are blanked before the scan. A note column
+# reading 'escalated from siu.queue' is not a table reference, and neither is a
+# -- comment saying where the numbers came from; both used to be blocked.
+# Backtick-quoted identifiers are deliberately NOT stripped: they are the table
+# names this is here to read.
+_BQ_SQL_NOISE_RE = _ge_re.compile(
+    r"--[^\n]*"
+    r"|/\*.*?\*/"
+    r"|'''.*?'''"
+    r'|""".*?"""'
+    r"|'(?:\\.|[^'\\\n])*'"
+    r'|"(?:\\.|[^"\\\n])*"',
+    _ge_re.DOTALL)
+# Anchored, because "error" appears in plenty of legitimate result rows - a
+# status column, an incident description, an audit note.
+_BQ_ERROR_PREFIXES = (
+    'not found', 'syntax error', 'unrecognized name', 'invalid ',
+    'access denied', 'permission denied', 'table not found',
+    'no matching signature', 'query error', 'bad request', '400 ', '403 ',
+)
+_BQ_MAX_CONSECUTIVE_ERRORS = 3
+
+
+def _bq_allowed_datasets():
+    """Datasets this agent may read, lower-cased. Its own, plus any opt-in."""
+    _allowed = {(os.environ.get("BIGQUERY_DATASET", "") or "").strip().lower()}
+    # Escape hatch for a demo that legitimately joins against another dataset
+    # (a shared reference dataset, a verified public table outside the
+    # bigquery-public-data project). Accepts `dataset` or `project.dataset`;
+    # only the dataset part is compared. Semicolons as well as commas, because
+    # this arrives through `gcloud run deploy --set-env-vars`, whose own
+    # separator is the comma - a comma-separated value there would be read as
+    # the start of the next variable.
+    for _extra in _ge_re.split(r'[,;]', os.environ.get("BQ_ALLOWED_DATASETS", "") or ""):
+        _extra = _extra.strip().lower()
+        if _extra:
+            _allowed.add(_extra.split(".")[-1])
+    _allowed.discard("")
+    return _allowed
+
+
+def _bq_skip_parens(sql, i):
+    """Index just past the parenthesised group that starts at sql[i] == '('."""
+    _depth = 0
+    while i < len(sql):
+        if sql[i] == '(':
+            _depth += 1
+        elif sql[i] == ')':
+            _depth -= 1
+            if _depth == 0:
+                return i + 1
+        i += 1
+    return len(sql)
+
+
+def _bq_refs_after_keyword(sql, pos):
+    """The table references one FROM/JOIN keyword introduces, commas included.
+
+    `FROM a.x, b.y` is a join written with a comma, and every item after the
+    first is as much a table reference as the first - reading only the first one
+    let a second dataset in through the side door. The walk stays anchored to
+    references it has already accepted, so a comma in a SELECT list, where the
+    dotted tokens are aliases and struct fields, can never reach it.
+    """
+    _refs = []
+    while True:
+        _m = _BQ_REF_AT_RE.match(sql, pos)
+        if not _m:
+            break
+        pos = _m.end()
+        if pos < len(sql) and sql[pos] == '(':
+            # UNNEST(...), EXTERNAL_QUERY(...): a call, not a table.
+            pos = _bq_skip_parens(sql, pos)
+        else:
+            _refs.append(_m.group(1))
+        _alias = _BQ_ALIAS_RE.match(sql, pos)
+        if _alias and _alias.group(1).upper() not in _BQ_NOT_AN_ALIAS:
+            pos = _alias.end()
+        _comma = _BQ_COMMA_RE.match(sql, pos)
+        if not _comma:
+            break
+        pos = _comma.end()
+    return _refs
+
+
+def _bq_out_of_scope_refs(sql):
+    """Returns the table references in `sql` that fall outside this demo.
+
+    Each entry is the offending text as it appeared, so the message handed back
+    to the model names the thing it actually wrote.
+    """
+    _allowed = _bq_allowed_datasets()
+    if not _allowed:
+        return []
+    _clean = _BQ_SQL_NOISE_RE.sub(' ', str(sql or ""))
+    _bad = []
+    _raws = []
+    for _kw in _BQ_KEYWORD_RE.finditer(_clean):
+        _raws.extend(_bq_refs_after_keyword(_clean, _kw.end()))
+    for _raw in _raws:
+        _parts = [_p.strip().strip('`').strip()
+                  for _p in _ge_re.split(r'\s*\.\s*', _raw.strip().strip('`'))]
+        _parts = [_p for _p in _parts if _p]
+        if len(_parts) < 2:
+            # A CTE name, an alias, UNNEST(...), or an unqualified table. None
+            # of them can reach another dataset.
+            continue
+        # region-us.INFORMATION_SCHEMA.JOBS and friends are project-wide by
+        # definition: there is no dataset to scope them to.
+        if _parts[0].lower().startswith('region-'):
+            _bad.append(_raw.strip())
+            continue
+        _upper = [_p.upper() for _p in _parts]
+        if 'INFORMATION_SCHEMA' in _upper:
+            # Its position, not the part count, says which token is the dataset:
+            # `ds.INFORMATION_SCHEMA.COLUMNS` and
+            # `proj.ds.INFORMATION_SCHEMA.COLUMNS` are both scoped to the part
+            # immediately before the keyword. Reading parts[1] as the dataset
+            # here would reject the agent's own dataset.
+            _idx = _upper.index('INFORMATION_SCHEMA')
+            _project = _parts[0].lower() if _idx >= 2 else ""
+            _dataset = _parts[_idx - 1].lower() if _idx >= 1 else ""
+        else:
+            _project = _parts[0].lower() if len(_parts) >= 3 else ""
+            _dataset = _parts[1].lower() if len(_parts) >= 3 else _parts[0].lower()
+        if _project == 'bigquery-public-data':
+            continue
+        if _dataset in _allowed:
+            continue
+        _bad.append(_raw.strip())
+    # The same table named twice reads as two violations otherwise, and the
+    # message quotes only the first five.
+    return list(dict.fromkeys(_bad))
+
+
+def _looks_like_sql_error(tool_response):
+    """True when a BigQuery MCP response is a failure rather than a result set."""
+    if isinstance(tool_response, dict):
+        if tool_response.get('error') or tool_response.get('isError'):
+            return True
+        if str(tool_response.get('status', '')).lower() in ('error', 'failed'):
+            return True
+    _txt = str(tool_response or "").strip().lower()[:400]
+    if not _txt:
+        return False
+    return any(_marker in _txt[:200] for _marker in _BQ_ERROR_PREFIXES)
+
+
+def _bq_error_state(tool_context):
+    """Per-invocation consecutive-failure counter.
+
+    Scoped to the invocation on purpose: a turn that ends on three failures must
+    not leave the next turn pre-blocked, and the user's follow-up question is
+    frequently the thing that fixes the query.
+    """
+    _inv = str(getattr(tool_context, 'invocation_id', '') or '')
+    _state = tool_context.state.get('_bq_err') or {}
+    if _state.get('inv') != _inv:
+        _state = {'inv': _inv, 'n': 0}
+    return _state
+
+
+def _bigquery_scope_gate(tool, args, tool_context):
+    """Block cross-dataset SQL, and stop the agent flailing after N failures."""
+    _name = getattr(tool, 'name', '') or ''
+    if _name not in _BQ_SQL_TOOLS:
+        return None
+    if os.environ.get("BQ_SCOPE_GATE_OFF", "").lower() in ("1", "true", "yes"):
+        return None
+
+    _state = _bq_error_state(tool_context)
+    if _state.get('n', 0) >= _BQ_MAX_CONSECUTIVE_ERRORS:
+        return {
+            "status": "blocked",
+            "message": (
+                "SQL RECOVERY BUDGET EXHAUSTED: " + str(_state['n']) + " queries in a "
+                "row have failed, so this one was not run. Stop rewriting the query. "
+                "Tell the user plainly, in one or two sentences, WHAT you were trying "
+                "to work out and WHAT the database said, answer whatever part of their "
+                "question the data you already have can answer, and offer a suggestion "
+                "chip to retry. Never present another demo's data, an estimate, or an "
+                "invented figure as the answer."
+            ),
+        }
+
+    _a = args or {}
+    _sql = _a.get('query') or _a.get('sql') or _a.get('statement') or ''
+    _bad = _bq_out_of_scope_refs(str(_sql))
+    if not _bad:
+        return None
+    _dataset = os.environ.get("BIGQUERY_DATASET", "")
+    print("  [SCOPE GATE] Blocked out-of-scope SQL reference(s): " + ", ".join(_bad[:5]))
+    return {
+        "status": "blocked",
+        "message": (
+            "DATASET ISOLATION VIOLATION - this query was NOT run. It references "
+            + ", ".join("`" + _b + "`" for _b in _bad[:5]) + ", which is outside this "
+            "demo. The only dataset you may read is `" + _dataset + "` (plus "
+            "`bigquery-public-data` when the instruction names a public table). Other "
+            "datasets in this project belong to OTHER demos and their numbers are not "
+            "this business's numbers - quoting them would be a fabricated answer. "
+            "Project-wide views such as `region-us.INFORMATION_SCHEMA` are off limits "
+            "for the same reason. Rewrite the query against `" + _dataset + "`, and if "
+            "the data genuinely is not there, say so instead of looking elsewhere."
+        ),
+    }
+
+
+def _bq_track_sql_errors(tool, args, tool_context, tool_response):
+    """Count consecutive BigQuery failures so _bigquery_scope_gate can cap them."""
+    _name = getattr(tool, 'name', '') or ''
+    if _name not in _BQ_SQL_TOOLS:
+        return None
+    try:
+        _state = _bq_error_state(tool_context)
+        if _looks_like_sql_error(tool_response):
+            _state['n'] = _state.get('n', 0) + 1
+            print("  [SQL RECOVERY] Failure %d/%d this turn."
+                  % (_state['n'], _BQ_MAX_CONSECUTIVE_ERRORS))
+        else:
+            _state['n'] = 0
+        tool_context.state['_bq_err'] = _state
+    except Exception:  # noqa: BLE001 - a broken counter must not break the tool
+        pass
+    return None
+
 
 def _record_workspace_write(tool, args, tool_context, tool_response):
     """After a Workspace write succeeds, record it for dedup."""
@@ -1592,233 +2172,6 @@ def _log_bq_activity(tool, args, tool_context, tool_response):
 
 # --- Deep analysis sub-agent (Pro) ---
 # Delegated to by root_agent for complex multi-step reasoning tasks.
-_ma_scope_section = r"""
-
-SCOPE (with the autonomous agent enabled): you handle INLINE analysis of the
-demo data and interactive dashboards. Pure analysis stays with you - never
-delegate work you can finish inline. BUT if the task delegated to you turns
-out to require things you CANNOT do inline - """ + ("""web research beyond your
-own browser tool""" if os.environ.get("ENABLE_COMPUTER_USE") == "1" else """live web research""") + """, producing
-downloadable files, or acting on the user's Google Workspace (Drive save,
-Gmail draft, Chat post, Calendar) - call delegate_autonomous_task ONCE with
-the user's FULL original goal as the task_description, present its
-acknowledgement to the user, and end your turn. """ + ("""Interactive website
-operation (clicking, typing, forms, portals) is NOT a delegation reason -
-you have the real browser (computer_use_browse); run it yourself. """ if os.environ.get("ENABLE_COMPUTER_USE") == "1" else "") + """NEVER tell the user such
-work is blocked or restricted for security reasons - it is not; hand it to
-the autonomous agent instead.
-""" if os.environ.get("ENABLE_MANAGED_AGENT") == "1" else ""
-
-_ma_progress_rule = r"""
-5. **RUNNING-TASK PROGRESS MENTIONS**: entries inside a "TASKS STILL RUNNING"
-   sub-block are PROGRESS info for tasks that are NOT finished. Do NOT announce
-   them as completed and do NOT show a View Full Report button for them.
-   Instead, append ONE short sentence at the END of your response (in the
-   user's language) noting the progress, e.g. that the autonomous task is at
-   NN% and still working - then nothing more. If the same running task was
-   already mentioned in your immediately previous response and its progress
-   has not changed meaningfully, you MAY omit the mention to avoid repetition.
-""" if os.environ.get("ENABLE_MANAGED_AGENT") == "1" else ""
-
-_ma_delegation_override = r"""
-
-AUTONOMOUS AGENT DELEGATION (PRIORITY OVERRIDE over the two conditions above):
-A fully autonomous cloud agent is available via the delegate_autonomous_task
-tool. It works in an isolated sandbox (bash terminal, persistent filesystem,
-code execution, pip/npm installs, Google Search, web page reading, direct
-BigQuery/Firestore access) and produces professional deliverable FILES
-(presentation decks, documents, PDF reports, web pages) returned to the user
-as download links. With this agent available, deep_analysis_agent's charter
-NARROWS to: analysis of the demo data that finishes inline in well under a
-minute, plus INTERACTIVE dashboards (rule below). For anything beyond a quick
-inline analysis, prefer the autonomous agent.
-
-Decide by CAPABILITY, in this order:
-""" + ("""0. INTERACTIVE BROWSER OPERATION STAYS WITH YOU: when the PRIMARY goal is
-   to operate a website interactively - go to a specific site and click /
-   type / fill forms / work a portal, or a live look-up the user wants to
-   WATCH - handle it yourself with the browser tools per the COMPUTER USE
-   section (inline, or register_background_task for long multi-page jobs).
-   The autonomous agent reads pages programmatically and has NO interactive
-   browser, so do NOT delegate pure browser-operation tasks. This rule ALSO
-   fires whenever the request mentions web browsing (in any language) or
-   names a specific external site / page / URL to consult - the live
-   browser run is part of what the user asked to see. Delegate only
-   when the browsing merely feeds a bigger job that also needs a file
-   deliverable, a Workspace action, or software work - and in that case
-   run the browse FIRST yourself and pass the findings via input_data
-   (see PRE-BROWSE under "When delegating").
-1. If the task needs ANY of: live web research (READ-ONLY
-   gathering - interactive site operation is rule 0), a downloadable file,""" if os.environ.get("ENABLE_COMPUTER_USE") == "1" else """1. If the task needs ANY of: live web research, a downloadable file,""") + """
-   building-and-running code, or clearly more than a minute of autonomous
-   multi-step work -> call delegate_autonomous_task. Neither you nor
-   deep_analysis_agent can """ + ("""produce deliverable files or build software.""" if os.environ.get("ENABLE_COMPUTER_USE") == "1" else """do these.""") + """
-2. Otherwise, if it is demo-data analysis that finishes inline in well under
-   a minute, or an INTERACTIVE dashboard (see below) -> deep_analysis_agent.
-3. Otherwise (quick lookups, snapshots, simple writes) -> handle yourself.
-Tie-breaker: if the demo data alone plus reasoning fully answers it, stay
-inline / deep_analysis; if it requires a file, """ + ("""read-only web research""" if os.environ.get("ENABLE_COMPUTER_USE") == "1" else """the web""") + """, or software work,
-ALWAYS prefer delegate_autonomous_task.
-
-Delegation-class tasks are NOT gated by the pre-flight Analysis Plan card
-and do NOT get execution-mode chips. When the request has material
-information gaps, the SYSTEM shows an Autonomous Task Briefing card and the
-confirmed brief arrives with a briefing-confirmation system note - in that
-case call delegate_autonomous_task as your VERY FIRST action with that
-brief, and NEVER re-ask clarifying questions. When no card was shown, the
-brief was judged specific enough: also delegate as your VERY FIRST action
-without asking your own questions. """ + ("""SOLE EXCEPTION - PRE-BROWSE: when
-the brief mentions web browsing or names a specific site / page / URL to
-consult (or needs data only interactive browsing can obtain), the
-COMPUTER USE browse sequence comes first and delegate_autonomous_task
-immediately after, in the SAME turn; clarifying questions remain
-forbidden either way. """ if os.environ.get("ENABLE_COMPUTER_USE") == "1" else "") + """The tool manages inline-vs-background by
-itself (fast tasks return inline; long tasks continue in the background and
-announce completion automatically).
-
-Delegation signals (recognize the MEANING in ANY language, not keywords):
-researching current market / industry / competitor information online;
-build or prototype something; create a presentation, deck, or slides; a
-document, proposal, or one-pager; a PDF; a standalone web page or microsite
-file; anything called "downloadable" or "a file"; explicit requests for the
-autonomous agent.
-
-When delegating:
-- Write task_description as a COMPLETE brief in the USER'S language: goal,
-  deliverable type, audience, and key constraints. When the task depends on
-  internal data, query the demo database FIRST and pass the results via
-  input_data so the autonomous agent verifies and extends them instead of
-  rediscovering everything.
-- DELEGATE ONLY WHAT WAS ASKED: the brief must not add deliverable formats
-  (slides, PDFs, documents, web apps) the user did not request. If the user
-  asked a decision-support question, answer it in chat with cards - offer a
-  formal deliverable as a follow-up suggestion chip instead of delegating it
-  unrequested.
-- NEVER DELEGATE CHAT UPLOADS: the autonomous agent cannot see images or
-  files uploaded to this chat. Extract their contents yourself first (your
-  vision / file parsing) and pass the structured findings as text via
-  input_data.
-""" + ("""- PRE-BROWSE: when the task mentions web browsing, names a specific
-  external site / page / portal / URL to consult, or depends on data that
-  only interactive browsing can obtain, gather that part BEFORE delegating
-  using the COMPUTER USE section's exact sequence (start_browser_session ->
-  show the live-view link -> a single computer_use_browse with a NARROW
-  goal that fits the inline step cap). This is MANDATORY when a site is
-  named - the live browse is a showcase moment, not an optimization choice.
-  Then put the result_summary into input_data under the label
-  "BROWSER FINDINGS (gathered live from <url>):" so the autonomous agent
-  builds on real, fresh web data. If the browse returns status 'partial',
-  pass whatever was gathered and state in task_description that the
-  remaining gaps should be covered with its own read-only web research.
-  The autonomous agent has NO interactive browser - never ask it to
-  operate a website.
-""" if os.environ.get("ENABLE_COMPUTER_USE") == "1" else "") + r"""- Describe OUTCOMES ONLY - NEVER mention your own tool names
-  (publish_dashboard, save_deliverables_to_drive, execute_sql,
-  register_background_task, ...) inside task_description. The autonomous
-  agent has a DIFFERENT toolset (bash, filesystem, web research""" + (""", the gws
-  CLI""" if os.environ.get("ENABLE_WORKSPACE_MCP") == "1" or os.environ.get("ENABLE_WORKSPACE_AUTH") == "1" else "") + """, and the deliverable upload URLs) and cannot call your tools;
-  referencing them derails its run. Say "produce an interactive HTML
-  dashboard file" instead of "use publish_dashboard".""" + (""" When the user wants
-  the result in Drive / Google formats, state it in natural language
-  ("save the finished deck to my Google Drive as Google Slides") - the
-  autonomous agent uploads with conversion via its Workspace CLI during
-  the run.""" if os.environ.get("ENABLE_WORKSPACE_MCP") == "1" or os.environ.get("ENABLE_WORKSPACE_AUTH") == "1" else """
-- NO WORKSPACE ACCESS: Workspace integration is DISABLED for this demo.
-  The autonomous agent has NO Google Workspace credentials, no gws CLI
-  authentication, and no Admin SDK access. NEVER delegate work that
-  requires reading or administering Gmail, Chat, Calendar, Drive, or
-  Workspace users / groups / permissions (audits included) - the sandbox
-  cannot authenticate and the task will grind until its runtime window
-  expires. Fulfill such requests from the demo dataset (BigQuery /
-  Firestore) instead, and tell the user that real Workspace actions are
-  not enabled in this demo.""") + """
-- SPLIT COMPOSITE REQUESTS: the autonomous agent CANNOT create scheduled /
-  recurring jobs, dashboards hosted by this platform, or database alert
-  rules - those live in YOUR toolset. When the user wants autonomous work
-  (research / file deliverables / Workspace actions) to run on a RECURRING
-  schedule, register it with register_scheduled_autonomous_task - each fire
-  then delegates to the sandbox automatically, even while the user is
-  offline, and results are announced on their next message. When a request
-  combines a ONE-SHOT autonomous task with a recurring demo-database
-  monitoring job, delegate the autonomous part and set up the database job
-  with register_scheduled_task in the SAME turn (and tell the user you did
-  both). Never put "set up a daily job" wording into task_description.
-- Call delegate_autonomous_task EXACTLY ONCE per user request.
-- Status 'completed': present the report verbatim as markdown (it is already
-  in the user's language) including any deliverable download links.
-- Status 'working_in_background': tell the user the autonomous agent keeps
-  working and the finished result will be announced automatically; mention
-  progress can be checked anytime (get_autonomous_task_status).
-Do NOT use register_background_task for autonomous-agent work (that tool is
-for demo-database batch workflows), and never delegate simple lookups.
-""" if os.environ.get("ENABLE_MANAGED_AGENT") == "1" else ""
-
-_ma_autonomous_exception = r"""
-EXCEPTION - AUTONOMOUS TASKS (check FIRST): if the "Run Inline:" scope requires
-live web research""" + (""" (READ-ONLY gathering; interactive browser operation is
-NOT this - run it yourself per the COMPUTER USE section)""" if os.environ.get("ENABLE_COMPUTER_USE") == "1" else "") + """, a downloadable file deliverable (deck / document / PDF /
-web page file), or building-and-running code, do NOT transfer to
-deep_analysis_agent (it cannot do those itself; it can only re-delegate to
-the autonomous agent as an escape hatch, which wastes the extra hop).
-Call delegate_autonomous_task directly instead.
-your VERY FIRST action - UNLESS the autonomous-task
-exception above applies, in which case delegate_autonomous_task is your very
-first action instead. Do NOT run any analytical SQL, schema inspection, or
-""" if os.environ.get("ENABLE_MANAGED_AGENT") == "1" else ""
-
-_non_ma_first_action = r"""
-your VERY FIRST action. Do NOT run any analytical SQL, schema inspection, or
-""" if not os.environ.get("ENABLE_MANAGED_AGENT") == "1" else ""
-
-_dh_handoff_section = r"""
-GOOGLE WORKSPACE HANDOFF (Workspace access is enabled):
-1. DRIVE SAVE: deliverable files can be saved straight into the user's
-   Google Drive with save_deliverables_to_drive. Office files are
-   AUTO-CONVERTED to native Google formats (pptx -> Google Slides, docx ->
-   Google Docs, xlsx -> Google Sheets); PDFs are stored as-is; web pages
-   keep their one-click preview link and are not copied.
-   - When the ORIGINAL request asked for Drive / Google Slides / Docs /
-     Sheets, the autonomous agent normally saves in-task and its report
-     already contains Drive webViewLink URLs - then just present those
-     links. Only when the report shows NO Drive links (or says the save
-     failed) call save_deliverables_to_drive with the ticket-id in the
-     SAME turn as the completion announcement, then present the returned
-     webViewLink URLs as markdown links.
-   - Otherwise, whenever you present a completed delegation that produced
-     files, include a suggestion chip labelled with the localized equivalent
-     of "Save to Google Drive" whose sendText is exactly:
-     Save the deliverables of task <ticket-id> to Google Drive
-   - If the tool returns auth_required, tell the user to re-authorize the
-     agent in Gemini Enterprise, then offer the chip again.
-2. WORKSPACE ACTIONS BY THE AUTONOMOUS AGENT: the autonomous agent itself
-   can act on the user's Workspace during a delegated task (draft Gmail
-   messages, post to a named Google Chat space, create Calendar events,
-   work with Drive) - their authorization travels with the delegation
-   automatically. So requests that COMBINE a deliverable with Workspace
-   actions (e.g. "build the deck, save it to my Drive, draft an email to
-   the leadership team, and set up a review meeting") are delegation-class:
-   put ALL of it into ONE delegate_autonomous_task task_description,
-   including the exact Chat space / recipients the user named.
-   Set expectations honestly: email is prepared as a DRAFT unless the user
-   explicitly asked to send. If a named Chat space does not exist yet, the
-   autonomous agent CREATES it and then posts - never tell the user a Chat
-   task is impossible because the space is missing.
-   PRESENTING WORKSPACE RESULTS: when the report says a Gmail draft / Chat
-   post / Calendar event was created, it REALLY exists in the user's
-   Workspace. Present drafts with their subject and the link
-   https://mail.google.com/mail/u/0/#drafts (opens the Drafts folder) -
-   never as a copy-paste text block, and never with a "cannot send"
-   disclaimer.
-   CHAT CONFIGURATION FAILURES: if the report says a Chat post failed
-   because the Google Chat API app configuration is missing, tell the user
-   EXACTLY that: an administrator completes a one-time configuration at
-   https://console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat
-   (setup tutorial step 4) and Chat posting starts working - then relay
-   the prepared message text from the report. NEVER attribute the failure
-   to vague "security restrictions" or tenant policy.
-
-""" if (os.environ.get("ENABLE_MANAGED_AGENT") == "1" and (os.environ.get("ENABLE_WORKSPACE_MCP") == "1" or os.environ.get("ENABLE_WORKSPACE_AUTH") == "1")) else ""
-
 deep_analysis_agent = LlmAgent(
     model=gemini_pro_model,
     name='deep_analysis_agent',
@@ -1828,13 +2181,26 @@ deep_analysis_agent = LlmAgent(
         'comparative analysis, strategic recommendations, and recovering from '
         'errors that require deeper understanding of the problem.'
     ),
-    instruction=final_instruction + r"""
+    instruction=_static_instruction(final_instruction + r"""
 
 --- DEEP ANALYSIS AGENT RULES ---
 You are the deep analysis specialist. You have been delegated a complex task
 from the coordinator agent. Your analysis MUST be rigorous, evidence-based,
 and actionable.
-""" + _ma_scope_section + r"""
+
+SCOPE (with the autonomous agent enabled): you handle INLINE analysis of the
+demo data and interactive dashboards. Pure analysis stays with you - never
+delegate work you can finish inline. BUT if the task delegated to you turns
+out to require things you CANNOT do inline - web research beyond your
+own browser tool, producing
+downloadable files, or acting on the user's Google Workspace (Drive save,
+Gmail draft, Chat post, Calendar) - call delegate_autonomous_task ONCE with
+the user's FULL original goal as the task_description, present its
+acknowledgement to the user, and end your turn. Interactive website
+operation (clicking, typing, forms, portals) is NOT a delegation reason -
+you have the real browser (computer_use_browse); run it yourself. NEVER tell the user such
+work is blocked or restricted for security reasons - it is not; hand it to
+the autonomous agent instead.
 
 
 DEPTH OVER SPEED: You are specifically chosen because this task requires
@@ -1940,11 +2306,11 @@ Do NOT produce a shallow summary — the user explicitly requested deep analysis
      a single dimension/breakdown, one time window, or the root-cause of the
      single biggest finding) so that pressing it runs as another quick
      synchronous turn - NOT a background task. Write each drill-down chip's
-     sendText context as "Run Inline: <the narrower request>" (the "Run Inline:"
+     action event context.prompt as "Run Inline: <the narrower request>" (the "Run Inline:"
      prefix makes it run synchronously and skip the pre-flight plan card). This
      keeps the conversation an interactive loop: result -> drill-down -> result.
      You MAY ALSO include AT MOST ONE optional escape-hatch chip for the full
-     exhaustive/comprehensive run as a background task, whose sendText context
+     exhaustive/comprehensive run as a background task, whose context.prompt
      is "Run in Background: <the full verbatim analysis request>" - offer it
      only when a genuinely exhaustive batch (every row/entity) adds value beyond
      the interactive drill-downs. Do NOT ask the user to choose
@@ -2195,14 +2561,14 @@ SCHEDULED TASKS:
 - register_scheduled_task: Register a recurring task with cron schedule.
 - update_scheduled_task: Change the cron schedule of an existing task.
 - delete_scheduled_task: Remove a scheduled task and its Cloud Scheduler job.
-""" + ("""- register_scheduled_autonomous_task: Register a RECURRING schedule for
+- register_scheduled_autonomous_task: Register a RECURRING schedule for
   AUTONOMOUS sandbox work (web research, file deliverables, Workspace
   actions). Fires even while the user is offline; each fire creates an
   autonomous ticket whose progress and completion are announced
   automatically on the user's next message. Use for "every day / week, do
   X" requests that need the autonomous agent - NOT register_scheduled_task
   (that one runs the demo-database background worker).
-""" if os.environ.get("ENABLE_MANAGED_AGENT") == "1" else "") + """- run_scheduled_task_now: Trigger ONE immediate background execution of an
+- run_scheduled_task_now: Trigger ONE immediate background execution of an
   already-registered scheduled task (manual test run). Returns a ticket
   instantly; the result is reported automatically when done (or via
   get_task_result).
@@ -2241,12 +2607,12 @@ background task first. Instead:
    drill-downs: 2-3 chips, each a NARROWER follow-up on what you just found
    (a specific top entity, one breakdown dimension, a single time window, or
    the root-cause of the biggest finding) so pressing it runs as another quick
-   synchronous turn. Write each drill-down chip's sendText context as
+   synchronous turn. Write each drill-down chip's action event context.prompt as
    "Run Inline: <narrower request>" (the prefix runs it synchronously and skips
    the pre-flight plan card) - this keeps an interactive loop: result ->
    drill-down -> result. You MAY ALSO add AT MOST ONE optional background
    escape-hatch chip for a genuinely exhaustive/comprehensive run, whose
-   sendText context is "Run in Background: <full verbatim analysis request>".
+   context.prompt is "Run in Background: <full verbatim analysis request>".
    Write all chip LABELS in the SAME language the user is using.
 3. Do NOT call register_background_task yourself for the inline request - the
    background run starts only if the user presses the escape-hatch chip.
@@ -2257,36 +2623,30 @@ analysis) should you register a background task up-front instead of
 answering inline. In that case confirm the ticket-id and tell the user
 they can monitor progress in the Data Viewer Tasks tab.
 --- END BACKGROUND TASK MANAGEMENT ---
-""",
+"""),
     tools=_all_tools,
     code_executor=_code_executor,
     generate_content_config=_validated_generate_config,
     before_model_callback=_strip_part_metadata,
     after_model_callback=[inject_image_callback, a2ui_metadata_callback, _enforce_task_result_text],
-    before_tool_callback=[_inline_tool_budget_gate, _dedup_workspace_writes],
-    after_tool_callback=[_record_workspace_write, _log_bq_activity],
+    before_tool_callback=[_inline_tool_budget_gate, _dedup_workspace_writes, _bigquery_scope_gate],
+    after_tool_callback=[_record_workspace_write, _log_bq_activity, _bq_track_sql_errors],
     disallow_transfer_to_parent=False,
     disallow_transfer_to_peers=False,
 )
 
 # --- Root agent / coordinator (Flash-Lite) ---
 # Handles most interactions directly; delegates complex analysis to Pro.
-root_agent = LlmAgent(
-    model=gemini_lite_model,
-    name='root_agent',
-    instruction=final_instruction + r"""
+_ROOT_INSTRUCTION_TEMPLATE = final_instruction + r"""
 
 --- AUTOMATIC BACKGROUND TASK NOTIFICATION (MANDATORY) ---
-If a background task you scheduled earlier completes, its final results will be automatically injected into the section below:
+When a background or autonomous task completes or updates, an auto-generated [SYSTEM NOTE] containing the task status, ticket ID, result summary, and deliverable links is automatically provided in the conversation history.
 
-{_bg_task_results}
-
-When you see non-empty content inside the block above (meaning the task has completed or failed):
+When you see a [SYSTEM NOTE] about background task completion or progress:
 1. **PRIORITIZE REPORTING**: In your very first response to the user (before answering their new question or request), you MUST proactively announce that the background task has completed or failed.
 2. **SUMMARIZE RESULTS**: Present a concise, high-level summary of the task status and key findings using appropriate A2UI elements. Keep it brief so it does not overwhelm the current conversation.
-3. **MANDATORY 'VIEW FULL REPORT' BUTTON**: In your suggestion chips (surfaceId: "suggestions"), you MUST include a button labeled "📄 View Full Report". The action for this button MUST be a sendText action with the exact text: "Show the full detailed report for task <task_id>" (replace <task_id> with the actual task ID from the notification). This ensures the user can easily fetch the complete, un-truncated report inside the chat whenever they want.
+3. **MANDATORY 'VIEW FULL REPORT' BUTTON**: In your suggestion chips (surfaceId: "suggestions"), you MUST include a button labeled "📄 View Full Report". The action for this button MUST be an event whose context.prompt is exactly: "Show the full detailed report for task <task_id>" (replace <task_id> with the actual task ID from the notification). This ensures the user can easily fetch the complete, un-truncated report inside the chat whenever they want.
 4. **SEAMLESS TRANSITION**: After presenting the background summary, seamlessly proceed to address the user's new request or question in the same response.
-""" + _ma_progress_rule + r"""
 ---
 
 --- TOOL CALL DISCIPLINE (CRITICAL) ---
@@ -2317,9 +2677,182 @@ Transfer to deep_analysis_agent when the request requires BOTH:
    sources (e.g. cross-referencing an uploaded spreadsheet with BigQuery tables),
    identify patterns/trends, draw conclusions, or produce strategic recommendations
    (e.g. identifying discrepancies, mismatches, or reconciliation anomalies).
-""" + _ma_delegation_override + r"""
 
-""" + _dh_handoff_section + r"""
+AUTONOMOUS AGENT DELEGATION (PRIORITY OVERRIDE over the two conditions above):
+A fully autonomous cloud agent is available via the delegate_autonomous_task
+tool. It works in an isolated sandbox (bash terminal, persistent filesystem,
+code execution, pip/npm installs, Google Search, web page reading, direct
+BigQuery/Firestore access) and produces professional deliverable FILES
+(presentation decks, documents, PDF reports, web pages) returned to the user
+as download links. With this agent available, deep_analysis_agent's charter
+NARROWS to: analysis of the demo data that finishes inline in well under a
+minute, plus INTERACTIVE dashboards (rule below). For anything beyond a quick
+inline analysis, prefer the autonomous agent.
+
+Decide by CAPABILITY, in this order:
+0. INTERACTIVE BROWSER OPERATION STAYS WITH YOU: when the PRIMARY goal is
+   to operate a website interactively - go to a specific site and click /
+   type / fill forms / work a portal, or a live look-up the user wants to
+   WATCH - handle it yourself with the browser tools per the COMPUTER USE
+   section (inline, or register_background_task for long multi-page jobs).
+   The autonomous agent reads pages programmatically and has NO interactive
+   browser, so do NOT delegate pure browser-operation tasks. This rule ALSO
+   fires whenever the request mentions web browsing (in any language) or
+   names a specific external site / page / URL to consult - the live
+   browser run is part of what the user asked to see. Delegate only
+   when the browsing merely feeds a bigger job that also needs a file
+   deliverable, a Workspace action, or software work - and in that case
+   run the browse FIRST yourself and pass the findings via input_data
+   (see PRE-BROWSE under "When delegating").
+1. If the task needs ANY of: live web research (READ-ONLY
+   gathering - interactive site operation is rule 0), a downloadable file,
+   building-and-running code, or clearly more than a minute of autonomous
+   multi-step work -> call delegate_autonomous_task. Neither you nor
+   deep_analysis_agent can produce deliverable files or build software.
+2. Otherwise, if it is demo-data analysis that finishes inline in well under
+   a minute, or an INTERACTIVE dashboard (see below) -> deep_analysis_agent.
+3. Otherwise (quick lookups, snapshots, simple writes) -> handle yourself.
+Tie-breaker: if the demo data alone plus reasoning fully answers it, stay
+inline / deep_analysis; if it requires a file, read-only web research, or software work,
+ALWAYS prefer delegate_autonomous_task.
+
+Delegation-class tasks are NOT gated by the pre-flight Analysis Plan card
+and do NOT get execution-mode chips. When the request has material
+information gaps, the SYSTEM shows an Autonomous Task Briefing card and the
+confirmed brief arrives with a briefing-confirmation system note - in that
+case call delegate_autonomous_task as your VERY FIRST action with that
+brief, and NEVER re-ask clarifying questions. When no card was shown, the
+brief was judged specific enough: also delegate as your VERY FIRST action
+without asking your own questions. SOLE EXCEPTION - PRE-BROWSE: when
+the brief mentions web browsing or names a specific site / page / URL to
+consult (or needs data only interactive browsing can obtain), the
+COMPUTER USE browse sequence comes first and delegate_autonomous_task
+immediately after, in the SAME turn; clarifying questions remain
+forbidden either way. The tool manages inline-vs-background by
+itself (fast tasks return inline; long tasks continue in the background and
+announce completion automatically).
+
+Delegation signals (recognize the MEANING in ANY language, not keywords):
+researching current market / industry / competitor information online;
+build or prototype something; create a presentation, deck, or slides; a
+document, proposal, or one-pager; a PDF; a standalone web page or microsite
+file; anything called "downloadable" or "a file"; explicit requests for the
+autonomous agent.
+
+When delegating:
+- Write task_description as a COMPLETE brief in the USER'S language: goal,
+  deliverable type, audience, and key constraints. When the task depends on
+  internal data, query the demo database FIRST and pass the results via
+  input_data so the autonomous agent verifies and extends them instead of
+  rediscovering everything.
+- DELEGATE ONLY WHAT WAS ASKED: the brief must not add deliverable formats
+  (slides, PDFs, documents, web apps) the user did not request. If the user
+  asked a decision-support question, answer it in chat with cards - offer a
+  formal deliverable as a follow-up suggestion chip instead of delegating it
+  unrequested.
+- NEVER DELEGATE CHAT UPLOADS: the autonomous agent cannot see images or
+  files uploaded to this chat. Extract their contents yourself first (your
+  vision / file parsing) and pass the structured findings as text via
+  input_data.
+- PRE-BROWSE: when the task mentions web browsing, names a specific
+  external site / page / portal / URL to consult, or depends on data that
+  only interactive browsing can obtain, gather that part BEFORE delegating
+  using the COMPUTER USE section's exact sequence (start_browser_session ->
+  show the live-view link -> a single computer_use_browse with a NARROW
+  goal that fits the inline step cap). This is MANDATORY when a site is
+  named - the live browse is a showcase moment, not an optimization choice.
+  Then put the result_summary into input_data under the label
+  "BROWSER FINDINGS (gathered live from <url>):" so the autonomous agent
+  builds on real, fresh web data. If the browse returns status 'partial',
+  pass whatever was gathered and state in task_description that the
+  remaining gaps should be covered with its own read-only web research.
+  The autonomous agent has NO interactive browser - never ask it to
+  operate a website.
+- Describe OUTCOMES ONLY - NEVER mention your own tool names
+  (publish_dashboard, save_deliverables_to_drive, execute_sql,
+  register_background_task, ...) inside task_description. The autonomous
+  agent has a DIFFERENT toolset (bash, filesystem, web research, the gws
+  CLI, and the deliverable upload URLs) and cannot call your tools;
+  referencing them derails its run. Say "produce an interactive HTML
+  dashboard file" instead of "use publish_dashboard". When the user wants
+  the result in Drive / Google formats, state it in natural language
+  ("save the finished deck to my Google Drive as Google Slides") - the
+  autonomous agent uploads with conversion via its Workspace CLI during
+  the run.
+- SPLIT COMPOSITE REQUESTS: the autonomous agent CANNOT create scheduled /
+  recurring jobs, dashboards hosted by this platform, or database alert
+  rules - those live in YOUR toolset. When the user wants autonomous work
+  (research / file deliverables / Workspace actions) to run on a RECURRING
+  schedule, register it with register_scheduled_autonomous_task - each fire
+  then delegates to the sandbox automatically, even while the user is
+  offline, and results are announced on their next message. When a request
+  combines a ONE-SHOT autonomous task with a recurring demo-database
+  monitoring job, delegate the autonomous part and set up the database job
+  with register_scheduled_task in the SAME turn (and tell the user you did
+  both). Never put "set up a daily job" wording into task_description.
+- Call delegate_autonomous_task EXACTLY ONCE per user request.
+- Status 'completed': present the report verbatim as markdown (it is already
+  in the user's language) including any deliverable download links.
+- Status 'working_in_background': tell the user the autonomous agent keeps
+  working and the finished result will be announced automatically; mention
+  progress can be checked anytime (get_autonomous_task_status).
+Do NOT use register_background_task for autonomous-agent work (that tool is
+for demo-database batch workflows), and never delegate simple lookups.
+
+GOOGLE WORKSPACE HANDOFF (Workspace access is enabled):
+1. DRIVE SAVE: deliverable files can be saved straight into the user's
+   Google Drive with save_deliverables_to_drive. Office files are
+   AUTO-CONVERTED to native Google formats (pptx -> Google Slides, docx ->
+   Google Docs, xlsx -> Google Sheets); PDFs are stored as-is; web pages
+   keep their one-click preview link and are not copied.
+   - When the ORIGINAL request asked for Drive / Google Slides / Docs /
+     Sheets, the autonomous agent normally saves in-task and its report
+     already contains Drive webViewLink URLs - then just present those
+     links. Only when the report shows NO Drive links (or says the save
+     failed) call save_deliverables_to_drive with the ticket-id in the
+     SAME turn as the completion announcement, then present the returned
+     webViewLink URLs as markdown links.
+   - Otherwise, whenever you present a completed delegation that produced
+     files, include a suggestion chip labelled with the localized equivalent
+     of "Save to Google Drive" whose context.prompt is exactly:
+     Save the deliverables of task <ticket-id> to Google Drive
+   - If the tool returns auth_required, tell the user to re-authorize the
+     agent in Gemini Enterprise, then offer the chip again.
+2. WORKSPACE ACTIONS BY THE AUTONOMOUS AGENT: the autonomous agent itself
+   can act on the user's Workspace during a delegated task (draft Gmail
+   messages, post to a named Google Chat space, create Calendar events,
+   work with Drive) - their authorization travels with the delegation
+   automatically. So requests that COMBINE a deliverable with Workspace
+   actions (e.g. "build the deck, save it to my Drive, draft an email to
+   the leadership team, and set up a review meeting") are delegation-class:
+   put ALL of it into ONE delegate_autonomous_task task_description,
+   including the exact Chat space / recipients the user named.
+   Set expectations honestly: email is prepared as a DRAFT unless the user
+   explicitly asked to send. If a named Chat space does not exist yet, the
+   autonomous agent CREATES it and then posts - never tell the user a Chat
+   task is impossible because the space is missing.
+   PRESENTING WORKSPACE RESULTS: when the report says a Gmail draft / Chat
+   post / Calendar event was created, it REALLY exists in the user's
+   Workspace. Present drafts with their subject and the link
+   https://mail.google.com/mail/u/0/#drafts (opens the Drafts folder) -
+   never as a copy-paste text block, and never with a "cannot send"
+   disclaimer.
+   CHAT CONFIGURATION FAILURES: if the report says a Chat post failed
+   because the Google Chat API app configuration is missing, tell the user
+   EXACTLY that: an administrator completes a one-time configuration at
+   https://console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat
+   (setup tutorial step 4) and Chat posting starts working - then relay
+   the prepared message text from the report. NEVER attribute the failure
+   to vague "security restrictions" or tenant policy.
+3. THIS DEMO'S SAMPLE DOCUMENTS: the external source documents of this demo
+   (audit report PDF, external ledger spreadsheet, scanned handwritten orders)
+   live in cloud storage. The deploy also puts them in a Google Drive folder and
+   shares it with the demo's audience, so a Drive or Sheets step over them
+   normally finds them. When a Drive search comes back empty, say that the
+   documents are in cloud storage and that the Drive folder is shared by the
+   person who deployed this demo - do NOT offer to copy them into the user's
+   Drive, the agent has no way to do that.
+
 INTERACTIVE DASHBOARD REQUESTS (ALWAYS DELEGATE — regardless of the two conditions
 above): When the user asks for an INTERACTIVE dashboard — signalled by the word
 "interactive" (or "clickable" / "explorable" / "open in the browser" / "a page I can
@@ -2362,7 +2895,7 @@ HOW TO ANSWER AN OVERVIEW (root, inline, fast):
    of context each (what the number means / a notable point). No multi-section
    report, no image.
 3. End with Next Actions suggestion chips, INCLUDING a deeper-dive chip whose
-   sendText is a plain analytical request (NO "Run Inline:" prefix), e.g.
+   context.prompt is a plain analytical request (NO "Run Inline:" prefix), e.g.
    "🔍 Deep-dive: analyze drivers of the onboarding funnel and recommend
    improvements". Pressing it is a deep_analysis-class request, so it routes
    through Step A below (the PRE-FLIGHT ANALYSIS PLAN CARD appears, inline is the
@@ -2394,7 +2927,18 @@ did not gate it), do NOT try to draw a plan card — just proceed per Step B
 (transfer inline). The card is the system's job; yours is the analysis.
 
 STEP B — INLINE EXECUTION (only AFTER the user picks "Run Inline:"):
-""" + _ma_autonomous_exception + _non_ma_first_action + r"""
+EXCEPTION - AUTONOMOUS TASKS (check FIRST): if the "Run Inline:" scope requires
+live web research (READ-ONLY gathering; interactive browser operation is
+NOT this - run it yourself per the COMPUTER USE section), a downloadable file deliverable (deck / document / PDF /
+web page file), or building-and-running code, do NOT transfer to
+deep_analysis_agent (it cannot do those itself; it can only re-delegate to
+the autonomous agent as an escape hatch, which wastes the extra hop).
+Call delegate_autonomous_task directly instead.
+Once the user presses "Run Inline:" on the card (or an inline drill-down chip
+carrying the "Run Inline:" prefix arrives), make transfer_to_deep_analysis_agent
+your VERY FIRST action - UNLESS the autonomous-task
+exception above applies, in which case delegate_autonomous_task is your very
+first action instead. Do NOT run any analytical SQL, schema inspection, or
 data tools in root yourself — the specialist does the analysis. Running queries
 here BEFORE transferring burns the inline time budget (you are the lightweight
 coordinator; a slow step here can starve the specialist and force the turn into
@@ -2416,7 +2960,7 @@ GO STRAIGHT TO BACKGROUND (without an inline pass) ONLY when:
   know takes many minutes (e.g. "run a full audit of every table overnight").
 In those cases register_background_task directly (TASK_PROMPT CONSTRUCTION
 RULES below), confirm the ticket-id, and include a "📊 Check Task Status"
-chip (sendText "Check progress of task <task_id>") plus, if DATA_VIEWER_URL
+chip (context.prompt "Check progress of task <task_id>") plus, if DATA_VIEWER_URL
 is set, a "🖥️ Open Operations Console" openUrl chip. Merely "detailed",
 "comprehensive", or "thorough" wording does NOT qualify — answer those inline.
 
@@ -2567,11 +3111,11 @@ SCHEDULED TASKS:
   The task runs via Cloud Scheduler at the specified intervals.
 - update_scheduled_task: Change the cron schedule of an existing scheduled task.
 - delete_scheduled_task: Remove a scheduled task and its Cloud Scheduler job.
-""" + ("""- register_scheduled_autonomous_task: Register a RECURRING schedule for
+- register_scheduled_autonomous_task: Register a RECURRING schedule for
   AUTONOMOUS sandbox work (web research, file deliverables, Workspace
   actions). Fires even while the user is offline; results are announced
   automatically on the user's next message.
-""" if os.environ.get("ENABLE_MANAGED_AGENT") == "1" else "") + """
+
 - run_scheduled_task_now: Trigger ONE immediate background execution of an
   already-registered scheduled task (manual test run). Returns a ticket
   instantly; the result is reported automatically when done (or via
@@ -2640,16 +3184,16 @@ PROGRESS REPORTING:
 - Report progress as percentage when user asks about status
 - RENDER PROGRESS AS PLAIN TEXT + CHIPS, NOT A CARD: present the status
   (task id, status, progress %, started-at) as plain markdown text, then put the
-  actions (e.g. "🔄 Refresh Progress" -> sendText "Check progress of task <id>",
+  actions (e.g. "🔄 Refresh Progress" -> context.prompt "Check progress of task <id>",
   "🏢 Operations Console") in the suggestion chips. Do NOT build a custom A2UI
   status/progress Card. A model-built status card reuses the same surfaceId on
   every refresh, and the client anchors a surfaceId to the turn where it FIRST
   rendered - so a second refresh that re-sends the card silently patches the OLD
   card and the new turn shows NOTHING (the buttons vanish). Plain text + chips
   render reliably every turn because chips are scoped per-turn automatically.
-- If you nonetheless render a status Card, you MUST emit a FRESH beginRendering
-  PLUS surfaceUpdate every turn with a UNIQUE surfaceId (append the check count
-  or task id, e.g. "task-progress-<id>-2"); NEVER send a surfaceUpdate alone
+- If you nonetheless render a status card, you MUST emit a FRESH createSurface
+  PLUS updateComponents every turn with a UNIQUE surfaceId (append the check count
+  or task id, e.g. "task-progress-<id>-2"); NEVER send an updateComponents alone
   reusing a previous turn's surfaceId.
 --- END BACKGROUND TASK MANAGEMENT ---
 
@@ -2681,7 +3225,7 @@ CONCRETE EXAMPLES OF WHAT TO SUGGEST:
 - After delivering a major analysis result card (when no image was just
   generated for it): the suggestion chips MUST include one chip offering
   to turn THIS result into an executive-summary slide, with the chip's
-  sendText context naming the specific analysis to visualize.
+  action event context.prompt naming the specific analysis to visualize.
 
 Suggestion format: State WHAT + WHY in 1 sentence, then include
 a suggestion chip for one-click execution.
@@ -2698,11 +3242,11 @@ no statistics, no cross-reference, fewer than 3 tool calls.
    format below), (3) offer the next steps as Next Actions A2UI chips, PREFERRING
    INLINE drill-downs: 2-3 chips, each a NARROWER synchronous follow-up on what
    you just found (one entity, one breakdown, one time window, or the biggest
-   finding's root cause), each chip's sendText context written as
+   finding's root cause), each chip's action event context.prompt written as
    "Run Inline: <narrower request>" (the prefix runs it synchronously and skips
    the pre-flight plan card). You MAY add
    AT MOST ONE background escape-hatch chip for the full exhaustive version,
-   sendText "Run in Background: <full structured plan>", and ALWAYS include a
+   context.prompt "Run in Background: <full structured plan>", and ALWAYS include a
    "This is sufficient" chip. Write all chip LABELS in the SAME language the
    user is using (labels e.g. "🔍 Drill into the top item" / "🚀 Run the full
    analysis in the background" / "✓ This is enough for now").
@@ -2740,7 +3284,7 @@ ANALYSIS 3: [Specific Name]
 Pick any one to drill into now, or run the full set comprehensively."
 
 CRITICAL: Offer each of these as a NARROWER inline drill-down chip by default
-(plain natural-language sendText, so it runs synchronously next turn). Only when
+(plain natural-language context.prompt, so it runs synchronously next turn). Only when
 the user presses the optional background escape-hatch chip ("Run in Background")
 do you copy this structured plan VERBATIM into the task_prompt of
 register_background_task following the TASK_PROMPT CONSTRUCTION RULES above.
@@ -2833,19 +3377,66 @@ Every A2UI payload MUST follow this exact structure:
 3. List component objects separated by commas.
 4. Close the array with ].
 5. End with </a2ui-json> tag.
-Correct: <a2ui-json>[beginRendering object, surfaceUpdate object]</a2ui-json>
-WRONG: beginRendering object without tags (missing tags and brackets = SYSTEM CRASH)
+Correct: <a2ui-json>[createSurface object, updateComponents object]</a2ui-json>
+WRONG: createSurface object without tags (missing tags and brackets = SYSTEM CRASH)
 ---
-""",
+"""
+
+# =============================================================================
+# Cache & Token Usage Telemetry Callback (agent.py)
+# =============================================================================
+async def _log_cache_and_model_telemetry(
+    callback_context: adk_callback_context.CallbackContext,
+    llm_response: adk_llm_response.LlmResponse,
+) -> None:
+    """Extracts verbatim token usage and cache performance metrics from the LLM response."""
+    if getattr(llm_response, 'usage_metadata', None) is None:
+        return
+
+    usage = getattr(llm_response, 'usage_metadata', None)
+    cache = getattr(llm_response, 'cache_metadata', None)
+    
+    cached_tokens = getattr(usage, 'cached_content_token_count', 0) or 0
+    prompt_tokens = getattr(usage, 'prompt_token_count', 0) or 0
+    candidates_tokens = getattr(usage, 'candidates_token_count', 0) or 0
+    
+    cache_hit = bool(cached_tokens > 0)
+    cache_hit_rate = (cached_tokens / prompt_tokens) if prompt_tokens > 0 else 0.0
+    
+    turn_idx = callback_context.session.state.get('_telemetry_turn_count', 0) + 1
+    callback_context.session.state['_telemetry_turn_count'] = turn_idx
+    
+    payload = {
+        "event": "llm_cache_telemetry",
+        "severity": "INFO",
+        "turn_index": turn_idx,
+        "session_id": getattr(callback_context.session, 'id', 'unknown'),
+        "cache_hit": cache_hit,
+        "cached_content_token_count": cached_tokens,
+        "prompt_token_count": prompt_tokens,
+        "candidates_token_count": candidates_tokens,
+        "cache_hit_rate": round(cache_hit_rate, 4),
+        "cache_name": getattr(cache, 'cache_name', None) if cache else None,
+        "invocations_used": getattr(cache, 'invocations_used', None) if cache else None,
+        "fingerprint": getattr(cache, 'fingerprint', None) if cache else None,
+    }
+    print(json.dumps(payload), flush=True)
+
+# 100% static instruction string preserves Context Cache fingerprint across all turns.
+_ROOT_INSTRUCTION = _ROOT_INSTRUCTION_TEMPLATE
+
+root_agent = LlmAgent(
+    model=gemini_lite_model,
+    name='root_agent',
+    instruction=_static_instruction(_ROOT_INSTRUCTION),
     tools=_all_tools,
     code_executor=_code_executor,
     generate_content_config=_validated_generate_config,
     sub_agents=[deep_analysis_agent],
-    before_agent_callback=_inject_completed_tasks,
     before_model_callback=_strip_part_metadata,
-    after_model_callback=[inject_image_callback, a2ui_metadata_callback, _enforce_task_result_text],
-    before_tool_callback=[_inline_tool_budget_gate, _dedup_workspace_writes],
-    after_tool_callback=[_record_workspace_write, _log_bq_activity],
+    after_model_callback=[inject_image_callback, a2ui_metadata_callback, _enforce_task_result_text, _log_cache_and_model_telemetry],
+    before_tool_callback=[_inline_tool_budget_gate, _dedup_workspace_writes, _bigquery_scope_gate],
+    after_tool_callback=[_record_workspace_write, _log_bq_activity, _bq_track_sql_errors],
 )
 
 # --- Background execution agent (Pro) ---
@@ -2854,28 +3445,14 @@ WRONG: beginRendering object without tags (missing tags and brackets = SYSTEM CR
 _bg_tools = [t for t in _all_tools if t is not tools.background_task_tool]
 _bg_tools = [t for t in _bg_tools if t is not tools.register_scheduled_task]
 _bg_tools = [t for t in _bg_tools if t is not tools.run_scheduled_task_now]
-if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
-    _bg_tools = [t for t in _bg_tools if t is not tools.register_scheduled_autonomous_task]
+_bg_tools = [t for t in _bg_tools if t is not tools.register_scheduled_autonomous_task]
 
-_bg_computer_use_section = r"""
---- COMPUTER USE (BROWSER AGENT) ---
-When the task_prompt asks you to browse a website, operate a portal, or otherwise use
-computer_use_browse:
-1. Call computer_use_browse with a clear goal and the start_url from the task_prompt.
-2. As your FIRST update_task_progress log entry, include the live_view_url it returns so
-   the user can watch the session, e.g. "Live view: <url>".
-3. computer_use_browse handles the full multi-step browser loop and safety confirmations
-   internally; call it ONCE per browsing objective, then use its result_summary.
-4. Fold the returned result_summary (and any extracted data) into your final answer, and
-   persist structured results to BigQuery/Firestore when the task_prompt asks for it.
-
-""" if os.environ.get("ENABLE_COMPUTER_USE") == "1" else ""
 
 background_agent = LlmAgent(
     model=gemini_pro_model,
     name='background_agent',
     description='Autonomous background worker for deep analysis and workflow execution.',
-    instruction=final_instruction + r"""
+    instruction=_static_instruction(final_instruction + r"""
 
 --- BACKGROUND EXECUTION AGENT (CRITICAL) ---
 You are an AUTONOMOUS BACKGROUND WORKER. You execute tasks WITHOUT user interaction.
@@ -2890,7 +3467,17 @@ EXECUTION RULES:
 5. Call update_task_progress after each major step to report real-time progress.
 6. Your final response is stored as result_summary in Firestore. Make it comprehensive.
 
-""" + _bg_computer_use_section + r"""
+--- COMPUTER USE (BROWSER AGENT) ---
+When the task_prompt asks you to browse a website, operate a portal, or otherwise use
+computer_use_browse:
+1. Call computer_use_browse with a clear goal and the start_url from the task_prompt.
+2. As your FIRST update_task_progress log entry, include the live_view_url it returns so
+   the user can watch the session, e.g. "Live view: <url>".
+3. computer_use_browse handles the full multi-step browser loop and safety confirmations
+   internally; call it ONCE per browsing objective, then use its result_summary.
+4. Fold the returned result_summary (and any extracted data) into your final answer, and
+   persist structured results to BigQuery/Firestore when the task_prompt asks for it.
+
 --- DEEP MULTI-STEP REASONING (MANDATORY) ---
 You MUST prioritize analytical depth over speed. Your analysis must be:
 
@@ -3073,14 +3660,14 @@ You MUST NEVER claim to have performed an action that you do not have a tool for
 - You CANNOT send emails, Slack messages, or any notifications.
 - When a workflow step involves notification, state:
   "I have DRAFTED a notification below, but I cannot send it automatically."
-""",
+"""),
     tools=_bg_tools,
     code_executor=_code_executor,
     generate_content_config=_validated_generate_config,
     before_model_callback=_strip_part_metadata,
     after_model_callback=[_enforce_task_result_text],
-    before_tool_callback=_dedup_workspace_writes,
-    after_tool_callback=[_record_workspace_write, _log_bq_activity],
+    before_tool_callback=[_dedup_workspace_writes, _bigquery_scope_gate],
+    after_tool_callback=[_record_workspace_write, _log_bq_activity, _bq_track_sql_errors],
 )
 
 app = App(

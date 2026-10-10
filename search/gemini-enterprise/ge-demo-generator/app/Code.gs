@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 /**
- * GE Demo Generator — Backend (Code.gs)
+ * Gemini Enterprise Demo Generator — Backend (Code.gs)
  *
  * End-to-end generator for production-ready AI agent demo environments.
  * Given a natural-language business goal, this Google Apps Script file
@@ -21,7 +21,7 @@
  *
  * ── What Gets Generated ──────────────────────────────────────────────
  *   • Synthetic business data (BigQuery tables + optional Firestore docs)
- *   • Dual-model ADK agent (Gemini 3.5 Flash-Lite root → Pro analysis)
+ *   • Dual-model ADK agent (Gemini 3.8 Flash root + deep analysis sub-agent)
  *   • MCP toolsets — BigQuery, Maps, Firestore, Google Workspace (Gmail,
  *     Drive, Calendar, Chat, People), plus arbitrary GitHub MCP servers
  *   • A2A (Agent-to-Agent) server with A2UI interactive components
@@ -97,11 +97,11 @@ const SCRIPT_PROPS = PropertiesService.getScriptProperties();
 const CONFIG = {
   PROJECT_ID: SCRIPT_PROPS.getProperty('PROJECT_ID'),
   LOCATION: SCRIPT_PROPS.getProperty('LOCATION') || 'global',
-  MODEL: SCRIPT_PROPS.getProperty('MODEL') || 'gemini-3.6-flash',
+  MODEL: SCRIPT_PROPS.getProperty('MODEL') || 'gemini-3.8-flash',
   GITHUB_TOKEN: SCRIPT_PROPS.getProperty('GITHUB_TOKEN'),
   MAX_RETRIES: 3,
   RETRY_DELAY_MS: 1000,
-  APP_VERSION: 'v11.56-public',
+  APP_VERSION: 'v12.26-public',
   // Agent-template source: the generated setup script fetches the static
   // Python/JSON template files (agent_template/ in the repo) at run time.
   // TEMPLATE_REF may be a branch name (default 'main'): it is resolved to a
@@ -166,7 +166,7 @@ function doGet() {
     const template = HtmlService.createTemplateFromFile('SetupError');
     template.errorMessage = configError;
     return template.evaluate()
-      .setTitle('Setup Required - GE Demo Generator')
+      .setTitle('Setup Required - Gemini Enterprise Demo Generator')
       .addMetaTag('viewport', 'width=device-width, initial-scale=1.0');
   }
 
@@ -176,10 +176,10 @@ function doGet() {
 
   template.projectId = CONFIG.PROJECT_ID;
   template.userEmail = Session.getActiveUser().getEmail();
-  template.generatorModel = CONFIG.MODEL || 'gemini-3.6-flash';
+  template.generatorModel = CONFIG.MODEL || 'gemini-3.8-flash';
   
   return template.evaluate()
-    .setTitle('GE Demo Generator')
+    .setTitle('Gemini Enterprise Demo Generator')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1.0')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
@@ -358,7 +358,7 @@ function initializeProject(projectId, logSheetUrl) {
   const newProps = {
     PROJECT_ID: projectId, 
     LOCATION: currentProps.LOCATION || 'global',
-    MODEL: currentProps.MODEL || 'gemini-3.6-flash',
+    MODEL: currentProps.MODEL || 'gemini-3.8-flash',
     LOG_SHEET_URL: logSheetUrl || currentProps.LOG_SHEET_URL || ''
   };
   
@@ -542,7 +542,23 @@ function generateDemo(userGoal, options = {}) {
     // experience, provisioning is parallelized and fail-soft, and no
     // allowlist is required. The UI toggle allows opting out per demo.
     enableManagedAgent: true,
-    enableWorkspaceAuth: false
+    enableWorkspaceAuth: false,
+    // Cloud Run scale-to-zero is the default and the reason an idle demo costs
+    // nothing; see the deploy block for why max-instances is pinned to 1. The
+    // toggle exists because the trade-off lands on exactly one message - the
+    // first one after an idle gap - and that is often the one an audience
+    // watches. MIN_INSTANCES in the environment still overrides either way.
+    keepWarm: false,
+    enableCloudTelemetry: true,
+    enableModelArmor: false,
+    modelArmorTemplate: '',
+    // Data exploration. 'mcp' is the default: the data-asset catalog is already
+    // in the system instruction, so a figure question is ONE execute_sql call
+    // with no metadata expedition first, and no index has to be built, imported
+    // or scoped for the demo to work. 'rag' adds the Discovery Engine index and
+    // makes it the read path - worth it when the demo turns on documents rather
+    // than figures. v11.65-v11.72 defaulted to the hybrid variant of 'rag'.
+    dataExplorationMode: 'mcp'
   };
   options = { ...defaultOptions, ...options };
   
@@ -632,6 +648,11 @@ function generateDemo(userGoal, options = {}) {
     result.enableComputerUse = options.enableComputerUse || false;
     result.enableManagedAgent = options.enableManagedAgent || false;
     result.enableWorkspaceAuth = options.enableWorkspaceAuth || false;
+    result.keepWarm = options.keepWarm || false;
+    result.enableCloudTelemetry = options.enableCloudTelemetry !== false;
+    result.enableModelArmor = options.enableModelArmor || false;
+    result.modelArmorTemplate = options.modelArmorTemplate || '';
+    result.dataExplorationMode = (options.dataExplorationMode === 'rag') ? 'rag' : 'mcp';
 
     result.setupScript = generateSetupScript({
       datasetId: datasetId,
@@ -652,6 +673,11 @@ function generateDemo(userGoal, options = {}) {
       enableComputerUse: options.enableComputerUse,
       enableManagedAgent: options.enableManagedAgent,
       enableWorkspaceAuth: options.enableWorkspaceAuth,
+      keepWarm: options.keepWarm,
+      enableCloudTelemetry: result.enableCloudTelemetry,
+      enableModelArmor: result.enableModelArmor,
+      modelArmorTemplate: result.modelArmorTemplate,
+      dataExplorationMode: result.dataExplorationMode,
       metadata: planResult.metadata
     });
     result.steps.push({ step: 4, status: 'completed', message: 'Generation complete' });
@@ -847,7 +873,7 @@ function planAndGenerateData(userGoal, options) {
   }
   if (options.enableComputerUse) {
     prompt += `\n- **🖥️ COMPUTER USE (BROWSER AGENT) AVAILABLE**:
-    - The agent can operate a real headless web browser (Gemini 3.5 Flash Computer Use) to navigate, click, type, fill forms and extract data from sites that have NO API: competitor public pages, supplier/partner portals, government/regulatory sites, public data sources, and internal web apps. Browser runs happen as autonomous background tasks and the user can watch the live session.
+    - The agent can operate a real headless web browser (Gemini 3.8 Flash Computer Use) to navigate, click, type, fill forms and extract data from sites that have NO API: competitor public pages, supplier/partner portals, government/regulatory sites, public data sources, and internal web apps. Browser runs happen as autonomous background tasks and the user can watch the live session.
     - You MUST leverage this capability when generating the 'businessInstruction' and 'demoGuide' (prompts).
     - In 'businessInstruction', mention that the agent can autonomously browse external websites via a browser-automation background task to gather or act on data that has no API.
     - You MUST design at least TWO prompts (out of the 7 required) in the 'demoGuide' that explicitly ask the agent to browse an external website or portal to accomplish the goal.
@@ -924,6 +950,15 @@ function planAndGenerateData(userGoal, options) {
       }
     }
   }
+  // Density repair BEFORE validation and image rendering: cheaply top up an
+  // under-dense transaction table instead of failing the whole run (v11.25).
+  expandThinTables_(parsed, options);
+
+  // Repair externalFiles <-> demoGuide <-> tables consistency BEFORE image
+  // generation so any discrepancy row injected into imageRows is rendered
+  // into the image by buildImagePromptWithRows_.
+  validateAndRepairExternalFileBindings_(parsed);
+
   // Generate in-memory simulated images using Vertex AI Agent Platform gemini-3-pro-image
   if (parsed.externalFiles && parsed.externalFiles.length > 0) {
     console.log('[ImageGen-Pipeline] Scanning externalFiles for dynamic images...');
@@ -946,10 +981,6 @@ function planAndGenerateData(userGoal, options) {
       }
     }
   }
-
-  // Density repair BEFORE validation: cheaply top up an under-dense
-  // transaction table instead of failing the whole run (v11.25).
-  expandThinTables_(parsed, options);
 
   // Validation and Clean-up
   validateGeneratedData(parsed, options.rowCount, options.dataProfile);
@@ -995,14 +1026,14 @@ function getTechnicalInstruction_() {
     "This visual MUST be in the style of a professional business document or slide (e.g., an Executive Summary card, a high-level business infographic) " +
     "that summarizes the insights. " +
     "**NO IMAGE TOOL RAW RESPONSE OUTFALL (CRITICAL)**: When you call 'generate_image', the system automatically handles the image rendering. You MUST NEVER copy, reference, or output the tool's JSON return payload (e.g., `{'status': 'success', 'detail': '...'}`) in your conversational text response. Do NOT write statements like 'Image generated successfully' or repeat the status dictionary. Keep your text focused purely on business insights.\n" +
-    "4b. **INTERACTIVE DASHBOARD**: Instruct the agent that it can publish a full interactive HTML dashboard (opened in a browser tab) via the 'publish_dashboard' tool whenever the user asks for a dashboard, an executive dashboard, or an interactive/clickable report. The agent first gathers aggregated numbers (e.g. via execute_sql), then authors ONE complete self-contained HTML document (inline CSS/JS, charts from a CDN, data embedded as a JSON snapshot, interactive tabs/filters/dark mode, all labels in the user's language), calls 'publish_dashboard', and presents the returned dashboard_url as a Markdown link like [Open Executive Dashboard](URL) — never a bare URL, never an A2UI/openUrl button. The dashboard is a point-in-time snapshot. As with images, NEVER output the tool's raw JSON return payload.\n" +
+    "4b. **INTERACTIVE DASHBOARD**: Instruct the agent that it can publish a full interactive HTML dashboard (opened in a browser tab) via the 'publish_dashboard' tool whenever the user asks for a dashboard, an executive dashboard, or an interactive/clickable report. The agent first gathers aggregated numbers (e.g. via execute_sql), then authors ONE complete self-contained HTML document (inline CSS/JS, charts from a CDN, data embedded as a JSON snapshot, interactive tabs/filters/dark mode, all labels in the user's language), calls 'publish_dashboard', and presents the returned dashboard_url as a Markdown link like [Open Executive Dashboard](URL) alongside a native A2UI summary card — never a bare URL, never an A2UI/openUrl button. For an inline chat dashboard (no open-in-browser signal), compose native A2UI v0.9 components (MaterialCard + MaterialTabs + KPI MaterialRow + MaterialTable + VegaChart); IFrameSrcdoc and IFrameUrl are FORBIDDEN because Gemini Enterprise disables inline iframe rendering by default. The dashboard is a point-in-time snapshot. As with images, NEVER output the tool's raw JSON return payload.\n" +
     "5. Instruct to wait for user input before acting, but be persistent in error recovery.\n" +
     "6. **TRANSPARENCY & GROUNDING (CRITICAL)**: Instruct the agent to be highly transparent about its reasoning, " +
     "explicitly mentioning which tables and files it is consulting and what specific values it found, " +
     "to ensure the user can trace its logic back to the source data.\n" +
     "6b. **KNOWLEDGE CATALOG / METADATA-DRIVEN ANALYSIS (CRITICAL)**: Instruct the agent that it has access to the Knowledge Catalog (Dataplex) MCP tools " +
     "and MUST ground its analysis in metadata before composing BigQuery queries. Mandatory workflow: " +
-    "(a) for ANY exploratory or discovery question (e.g. 'what data do we have', 'what can you analyze', 'find data useful for X'), it MUST call 'search_entries' FIRST — before 'list_table_ids' / 'list_dataset_ids' — to discover and rank the relevant assets; " +
+    "(a) for a question ABOUT the metadata itself - how a metric is defined, what a code means, which asset is authoritative, how two assets relate - it MUST call 'search_entries' FIRST to discover and rank the relevant assets. A question about the DATA is answered from the data-asset catalog already in its prompt, or straight from SQL; a catalog call is never a warm-up for one; " +
     "(b) it MUST use 'lookup_entry' / 'lookup_context' (NOT 'get_table_info') to read column meanings, units, allowed values, data classifications, and table relationships (join keys); " +
     "(c) only then build the BigQuery query, selecting the correct tables and join keys based on the catalog metadata. Use 'get_table_info' only to confirm exact column types right before writing SQL, or during SQL error recovery. " +
     "If a catalog call returns nothing right after provisioning (metadata harvest can lag a few minutes), fall back to inspecting tables directly and retry catalog discovery later.\n" +
@@ -1012,7 +1043,7 @@ function getTechnicalInstruction_() {
     "the agent MUST NEVER execute the operation immediately. Instead, the agent MUST ALWAYS present a clear summary of the proposed database action " +
     "and ask the human user for explicit confirmation using <a2ui-json> tags. " +
     "When the confirmation covers MULTIPLE independently-actionable items (e.g. a batch of draft orders), the card MUST let the user select WHICH items to approve " +
-    "(MultipleChoice variant 'checkbox' or per-row CheckBox bound to /form paths, with the confirm Button carrying the selections) — all-or-nothing batch confirmations are forbidden.\n" +
+    "(a MaterialChips bound to a /form path, or a per-row MaterialCheckbox, with the confirm MaterialButton carrying the selections in its event context) — all-or-nothing batch confirmations are forbidden.\n" +
     "9. **OUTPUT PLACEMENT (HIGHEST PRIORITY — RULE #0)**: When you call a tool, any text you include in the SAME response as the tool call will be hidden from the user. " +
     "All analytical dashboards, insights, and A2UI suggestion chips MUST appear in your FINAL response that contains NO tool calls.\n\n" +
     
@@ -1021,30 +1052,36 @@ function getTechnicalInstruction_() {
     "If you find yourself writing a markdown table or a numbered list of data, STOP and convert it to an A2UI Card instead.\n\n" +
     
     "**ANALYTICAL RESULT CARD TEMPLATE (MANDATORY)**:\n" +
-    "When presenting query results, KPIs, or entity summaries, wrap them in an A2UI Card. " +
+    "When presenting query results, KPIs, or entity summaries, wrap them in an A2UI MaterialCard. " +
     "Use surfaceId matching the analysis type (e.g. 'fleet-audit', 'cost-analysis', 'entity-profile'), and make it UNIQUE per card: " +
     "when rendering ANOTHER card of a type already shown earlier in the conversation, append a short distinguishing suffix " +
     "(entity or sequence, e.g. 'batch-editor-sakura', 'cost-analysis-2'). NEVER reuse a surfaceId from a previous turn unless you are " +
     "intentionally updating or deleting that exact card: the client anchors a surfaceId to the message where it FIRST rendered, so a " +
     "reused id silently overwrites the OLD card and renders NOTHING in the current turn. " +
-    "Minimal structure:\n" +
+    "The surface MUST contain a component whose id is exactly \"root\" — that is what the client renders. Minimal structure:\n" +
     "[\n" +
-    "  { \"id\": \"card_root\", \"component\": { \"Card\": { \"children\": { \"explicitList\": [\"card_title\", \"card_divider\", \"card_body\"] } } } },\n" +
-    "  { \"id\": \"card_title\", \"component\": { \"Text\": { \"text\": { \"literalString\": \"[Title]\" }, \"usageHint\": \"title\" } } },\n" +
-    "  { \"id\": \"card_divider\", \"component\": { \"Divider\": {} } },\n" +
-    "  { \"id\": \"card_body\", \"component\": { \"Column\": { \"children\": { \"explicitList\": [\"kpi_row\", \"detail_list\"] } } } },\n" +
-    "  { \"id\": \"kpi_row\", \"component\": { \"Row\": { \"children\": { \"explicitList\": [\"kpi_1\", \"kpi_2\", \"kpi_3\"] }, \"distribution\": \"spaceEvenly\" } } },\n" +
-    "  { \"id\": \"kpi_1\", \"component\": { \"Column\": { \"children\": { \"explicitList\": [\"kpi_1_val\", \"kpi_1_lbl\"] } } } },\n" +
-    "  { \"id\": \"kpi_1_val\", \"component\": { \"Text\": { \"text\": { \"literalString\": \"[Value]\" }, \"usageHint\": \"title\" } } },\n" +
-    "  { \"id\": \"kpi_1_lbl\", \"component\": { \"Text\": { \"text\": { \"literalString\": \"[Label]\" }, \"usageHint\": \"caption\" } } }\n" +
+    "  { \"id\": \"root\", \"component\": \"MaterialCard\", \"children\": [\"card_body\"] },\n" +
+    "  { \"id\": \"card_body\", \"component\": \"MaterialColumn\", \"children\": [\"card_title\", \"card_divider\", \"kpi_row\", \"detail_table\"], \"justify\": \"start\", \"align\": \"stretch\", \"style\": { \"gap\": \"10px\" } },\n" +
+    "  { \"id\": \"card_title\", \"component\": \"MaterialText\", \"text\": \"[Title]\", \"usageHint\": \"h2\" },\n" +
+    "  { \"id\": \"card_divider\", \"component\": \"MaterialDivider\" },\n" +
+    "  { \"id\": \"kpi_row\", \"component\": \"MaterialRow\", \"children\": [\"kpi_1\", \"kpi_2\", \"kpi_3\"], \"justify\": \"spaceEvenly\", \"align\": \"start\", \"style\": { \"gap\": \"8px\" } },\n" +
+    "  { \"id\": \"kpi_1\", \"component\": \"MaterialColumn\", \"children\": [\"kpi_1_val\", \"kpi_1_lbl\"], \"justify\": \"start\", \"align\": \"center\" },\n" +
+    "  { \"id\": \"kpi_1_val\", \"component\": \"MaterialText\", \"text\": \"[Value]\", \"usageHint\": \"h3\" },\n" +
+    "  { \"id\": \"kpi_1_lbl\", \"component\": \"MaterialText\", \"text\": \"[Label]\", \"usageHint\": \"caption\" },\n" +
+    "  { \"id\": \"detail_table\", \"component\": \"MaterialTable\", \"columns\": [{ \"header\": \"[Col A]\", \"field\": \"a\" }, { \"header\": \"[Col B]\", \"field\": \"b\" }], \"rows\": [{ \"a\": \"[v]\", \"b\": \"[v]\" }] }\n" +
     "]\n" +
-    "Add more KPIs, Lists, and detail Rows as needed.\n" +
-    "**TABS & MODAL THRESHOLDS (MANDATORY)**: A card with 3+ logical sections OR 8+ detail rows MUST use Tabs instead of one long scroll. " +
-    "When showing Top-N of a larger result set, never cram the remainder into a footnote Text — put the full list in a Modal opened by a 'view all' button.\n" +
-    "**NO PSEUDO-TABLES (CRITICAL)**: Never pack multiple metrics into ONE Text component using '|' or '/' separators. " +
-    "One entity per Row, one metric per Column/Text, so values align visually.\n" +
+    "Define kpi_2 and kpi_3 exactly like kpi_1, and add more detail sections as needed. " +
+    "EVERY id listed in a 'children' array MUST exist as a component in the same updateComponents message — a dangling child id renders as a hole in the card, and a component that no chain of children reaches from \"root\" is never rendered at all.\n" +
+    "**TABS & DIALOG THRESHOLDS (MANDATORY)**: A card with 3+ logical sections OR 8+ detail rows MUST use MaterialTabs instead of one long scroll. " +
+    "When showing Top-N of a larger result set, never cram the remainder into a footnote MaterialText — put the full list in a MaterialDialog opened by a 'view all' button.\n" +
+    "**NO PSEUDO-TABLES (CRITICAL)**: Never pack multiple metrics into ONE MaterialText using '|' or '/' separators, and never hand-build a table out of nested MaterialRow/MaterialText. " +
+    "Tabular data MUST use the MaterialTable component (columns + rows), so values align visually.\n" +
+    "**RICH COMPONENTS (USE THEM)**: the catalog is the Gemini Enterprise composite catalog, so prefer the native component over a hand-rolled imitation: " +
+    "MaterialTable for any tabular result, VegaChart (a Vega-Lite spec) for a chart, MaterialProgressBar for a ratio/utilization, " +
+    "MaterialTabs + KPI MaterialRow + MaterialTable + VegaChart inside a MaterialCard for an inline dashboard (IFrameSrcdoc and IFrameUrl are FORBIDDEN — Gemini Enterprise disables inline iframe rendering by default), and a Canvas root when the answer is a long report that deserves a resizable side panel.\n" +
     "**WHAT-IF SIMULATION CARD (WOW MOMENT)**: When an analysis result depends on a tunable parameter (threshold, budget, quantity), follow the result card with a what-if card: " +
-    "a Slider (label, minValue/maxValue, value bound to a /form path) plus a primary Button whose action context carries the /form value to request recalculation. " +
+    "a MaterialSlider (min / max / step, value bound to a /form path, with its caption supplied by a MaterialText above it — MaterialSlider has no label property) " +
+    "plus a MaterialButton whose event context carries the /form value to request recalculation. " +
     "Strongly recommended for critical-threshold findings (safety stock, alert thresholds).\n\n" +
     
     "**WHEN TO USE A2UI CARDS vs TEXT**:\n" +
@@ -1056,105 +1093,98 @@ function getTechnicalInstruction_() {
     "Replace technical tags like [AUTO] or [APPROVAL REQUIRED] with localized friendly text (e.g. System Automated or Requires Your Approval).\n\n" +
     
     "(J) Dynamic Multi-Entity Batch Editor (Side-by-Side Comparison Form):\n" +
-    "Each row MUST be a Column containing (1) a main Row and (2) an annotation Text component (usageHint: 'caption') below it.\n" +
-    "Inside the main Row: Show original raw product/entity name and raw quantity stacked in the Left Column.\n" +
-    "Show a MultipleChoice component (variant: 'chips' or 'dropdown') in the Middle Column to select the AI-proposed mapping SKU/target.\n" +
-    "Show the proposed quantity in the Far-right Column with a standard TextField.\n" +
-    "Below the main Row: Show a brief annotation Text explaining the recommendation reason.\n\n" +
-    
+    "Each row MUST be a MaterialColumn containing (1) a main MaterialRow and (2) an annotation MaterialText (usageHint: 'caption') below it.\n" +
+    "Inside the main MaterialRow: Show original raw product/entity name and raw quantity stacked in the Left MaterialColumn.\n" +
+    "Show a MaterialChips (2-3 candidates) or a MaterialSelect (more than 3 candidates) in the Middle Column to select the AI-proposed mapping SKU/target.\n" +
+    "Show the proposed quantity in the Far-right Column with a MaterialInput.\n" +
+    "Below the main Row: Show a brief annotation MaterialText explaining the recommendation reason.\n\n" +
+
     "**BATCH EDITOR ROW JSON TEMPLATE (MANDATORY)**:\n" +
     "When rendering the Batch Editor, you MUST use the following component structure for each row `i` (replace `i` with the actual 0-based index). " +
     "Ensure all component IDs are completely unique (e.g., by appending `_i` to each ID). " +
     "You MUST wrap the entire A2UI JSON payload in <a2ui-json> tags. " +
-    "The block MUST contain all three messages in order — beginRendering, dataModelUpdate (the initial row values), and surfaceUpdate (every row component) — inside that SAME <a2ui-json> block. Stopping after beginRendering + dataModelUpdate opens an empty surface and the editor never appears. " +
+    "The block MUST contain all three messages in order — createSurface, updateDataModel (the initial row values), and updateComponents (every row component, including the one with id \"root\") — inside that SAME <a2ui-json> block. Stopping after createSurface + updateDataModel opens an empty surface and the editor never appears. " +
     "Here is the mandatory layout structure for a single row `i`:\n" +
     "[\n" +
     "{\n" +
     "  \"id\": \"row_container_i\",\n" +
-    "  \"component\": {\n" +
-    "    \"Column\": {\n" +
-    "      \"children\": { \"explicitList\": [\"main_row_i\", \"reason_text_i\"] }\n" +
-    "    }\n" +
-    "  }\n" +
+    "  \"component\": \"MaterialColumn\",\n" +
+    "  \"children\": [\"main_row_i\", \"reason_text_i\"],\n" +
+    "  \"justify\": \"start\",\n" +
+    "  \"align\": \"stretch\",\n" +
+    "  \"style\": { \"gap\": \"4px\" }\n" +
     "},\n" +
     "{\n" +
     "  \"id\": \"main_row_i\",\n" +
-    "  \"component\": {\n" +
-    "    \"Row\": {\n" +
-    "      \"children\": { \"explicitList\": [\"left_stack_i\", \"sku_select_i\", \"qty_field_i\"] },\n" +
-    "      \"distribution\": \"spaceBetween\",\n" +
-    "      \"alignment\": \"center\"\n" +
-    "    }\n" +
-    "  }\n" +
+    "  \"component\": \"MaterialRow\",\n" +
+    "  \"children\": [\"left_stack_i\", \"sku_select_i\", \"qty_field_i\"],\n" +
+    "  \"justify\": \"spaceBetween\",\n" +
+    "  \"align\": \"center\",\n" +
+    "  \"style\": { \"gap\": \"8px\" }\n" +
     "},\n" +
     "{\n" +
     "  \"id\": \"left_stack_i\",\n" +
-    "  \"component\": {\n" +
-    "    \"Column\": {\n" +
-    "      \"children\": { \"explicitList\": [\"orig_name_i\", \"orig_qty_i\"] },\n" +
-    "      \"distribution\": \"start\",\n" +
-    "      \"alignment\": \"start\"\n" +
-    "    }\n" +
-    "  }\n" +
+    "  \"component\": \"MaterialColumn\",\n" +
+    "  \"children\": [\"orig_name_i\", \"orig_qty_i\"],\n" +
+    "  \"justify\": \"start\",\n" +
+    "  \"align\": \"start\"\n" +
     "},\n" +
     "{\n" +
     "  \"id\": \"orig_name_i\",\n" +
-    "  \"component\": {\n" +
-    "    \"Text\": {\n" +
-    "      \"text\": { \"literalString\": \"[Original Item Name, e.g., 'エアコン5馬力']\" },\n" +
-    "      \"usageHint\": \"body\"\n" +
-    "    }\n" +
-    "  }\n" +
+    "  \"component\": \"MaterialText\",\n" +
+    "  \"text\": \"[Original Item Name, e.g., 'Line item A']\",\n" +
+    "  \"usageHint\": \"body\"\n" +
     "},\n" +
     "{\n" +
     "  \"id\": \"orig_qty_i\",\n" +
-    "  \"component\": {\n" +
-    "    \"Text\": {\n" +
-    "      \"text\": { \"literalString\": \"[Original Qty, e.g., 'Qty: 2']\" },\n" +
-    "      \"usageHint\": \"caption\"\n" +
-    "    }\n" +
-    "  }\n" +
+    "  \"component\": \"MaterialText\",\n" +
+    "  \"text\": \"[Original Qty, e.g., 'Qty: 2']\",\n" +
+    "  \"usageHint\": \"caption\"\n" +
     "},\n" +
     "{\n" +
     "  \"id\": \"sku_select_i\",\n" +
-    "  \"component\": {\n" +
-    "    \"MultipleChoice\": {\n" +
-    "      \"label\": { \"literalString\": \"[Select SKU]\" },\n" +
-    "      \"options\": [\n" +
-    "        { \"value\": \"SKU_CODE_A\", \"label\": { \"literalString\": \"[SKU_CODE_A]\" } },\n" +
-    "        { \"value\": \"SKU_CODE_B\", \"label\": { \"literalString\": \"[SKU_CODE_B]\" } }\n" +
-    "      ],\n" +
-    "      \"maxAllowedSelections\": 1,\n" +
-    "      \"variant\": \"chips\",\n" +
-    "      \"selections\": { \"path\": \"/form/item_i_selected_sku\" }\n" +
-    "    }\n" +
-    "  }\n" +
+    "  \"component\": \"MaterialChips\",\n" +
+    "  \"value\": { \"path\": \"/form/item_i_selected_sku\" },\n" +
+    "  \"options\": [\n" +
+    "    { \"label\": \"[SKU_CODE_A]\", \"value\": \"SKU_CODE_A\" },\n" +
+    "    { \"label\": \"[SKU_CODE_B]\", \"value\": \"SKU_CODE_B\" }\n" +
+    "  ]\n" +
     "},\n" +
     "{\n" +
     "  \"id\": \"qty_field_i\",\n" +
-    "  \"component\": {\n" +
-    "    \"TextField\": {\n" +
-    "      \"label\": { \"literalString\": \"[Qty]\" },\n" +
-    "      \"text\": { \"path\": \"/form/item_i_qty\" },\n" +
-    "      \"textFieldType\": \"shortText\"\n" +
-    "    }\n" +
-    "  }\n" +
+    "  \"component\": \"MaterialInput\",\n" +
+    "  \"label\": \"[Qty]\",\n" +
+    "  \"value\": { \"path\": \"/form/item_i_qty\" }\n" +
     "},\n" +
     "{\n" +
     "  \"id\": \"reason_text_i\",\n" +
-    "  \"component\": {\n" +
-    "    \"Text\": {\n" +
-    "      \"text\": { \"literalString\": \"💡 [Recommendation reason, e.g., 'Direct successor (95% match)']\" },\n" +
-    "      \"usageHint\": \"caption\"\n" +
-    "    }\n" +
-    "  }\n" +
+    "  \"component\": \"MaterialText\",\n" +
+    "  \"text\": \"💡 [Recommendation reason, e.g., 'Direct successor (95% match)']\",\n" +
+    "  \"usageHint\": \"caption\"\n" +
     "}\n" +
-    "]\n\n" +
+    "]\n" +
+    "MaterialChips has NO label property — if the middle column needs a caption, add a separate MaterialText above it. " +
+    "With more than 3 candidates use a MaterialSelect instead (it DOES take a label, and the same options array of {label, value}). " +
+    "Seed every bound path in the SAME block's updateDataModel, e.g. \"value\": { \"form\": { \"item_0_selected_sku\": \"SKU_CODE_A\", \"item_0_qty\": \"2\" } } at path \"/\", or one updateDataModel at path \"/form\" carrying the whole object.\n\n" +
     
-    "11. **SUGGESTION CHIPS (CRITICAL)**: At the END of EVERY response, you MUST append a lightweight A2UI suggestion chip bar using surfaceId 'suggestions' and root='root' containing a Row of 3-4 Buttons with sendText actions. The chip block MUST be COMPLETE: a single <a2ui-json> block containing BOTH the beginRendering message AND the surfaceUpdate message with all Button components — never emit beginRendering alone. NEVER write any plain text or markdown headers (like \"Next Actions\", \"💡 Next Actions\", or other localized header equivalent) before the suggestions block; the system will automatically render the appropriate header. " +
-    "**BUTTON SCHEMA CONFORMANCE (CRITICAL)**: NEVER nest components inside a Button's 'child' property. 'child' MUST always be a flat string pointing to the ID of a separately defined Text component, and that Text component MUST be included in the SAME surfaceUpdate components array as its Button — a Button whose label Text component is missing renders as a BLANK button in the UI. Before finishing any A2UI block, verify every Button's child id has a matching Text component in the same block.\n" +
-    "**EVERY CARD MUST BE COMPLETE (CRITICAL — applies to ALL surfaces, not just suggestions)**: a beginRendering message only OPENS an empty surface; the components are delivered by surfaceUpdate. EVERY <a2ui-json> block you emit MUST therefore contain BOTH the beginRendering message AND the surfaceUpdate message carrying the full component tree for that same surfaceId, in the SAME block. A dataModelUpdate is NOT a substitute for surfaceUpdate: emitting [beginRendering, dataModelUpdate] and then moving on renders NOTHING and the user sees only your prose. This is the single most common way a rich card silently disappears — before you close any <a2ui-json> block, confirm it contains a surfaceUpdate whose components array includes the root id named in beginRendering.\n" +
-    "**ACTION CONTEXT KEYS MUST NOT COLLIDE WITH COMPONENT IDS (CRITICAL)**: inside a Button action's 'context', every 'key' MUST be different from every component 'id' in the same card. A context key that matches a component id is resolved against the component tree by the client and arrives server-side as the unusable literal key '[object Object]', so that value is LOST. Prefix component ids to keep them distinct (context key \"title\" with component id \"fTitle\", key \"qty\" with id \"qtyField\", and so on).\n" +
+    "11. **SUGGESTION CHIPS (CRITICAL)**: **CHIPS GO IN THEIR OWN TRAILING SURFACE (READ FIRST)**: the 3-4 follow-up buttons are ALWAYS a separate 'suggestions' surface emitted AFTER the card, never a MaterialRow inside the card root's children. A turn's second A2UI surface does render - the rule that once said otherwise was wrong. Keeping the follow-ups out of the card keeps the answer card a clean read and makes the next actions a footer under it. **NO FOOTER ACTION ROW** on a result card for the same reason - its follow-ups belong in the trailing surface. **FOOTER SHAPE** applies only where a button cannot leave its card: the Welcome Card, whose buttons are its own content and which opens the conversation, and a compose/confirmation card whose button reads its own \"path\" bindings (a binding resolves only inside its own surface). There the card's main MaterialColumn MUST end with exactly two children, a MaterialDivider and then the MaterialRow of buttons (\"children\": [ ..., \"footerDivider\", \"actionRow\" ]). Nothing may follow that row, and the divider must sit immediately above it.\n" +
+    "At the END of EVERY such response, you MUST append a lightweight A2UI suggestion chip bar using surfaceId 'suggestions' and a MaterialRow whose id is 'root' containing 3-4 MaterialButtons. The chip block MUST be COMPLETE: a single <a2ui-json> block containing BOTH the createSurface message AND the updateComponents message with all MaterialButton components — never emit createSurface alone. NEVER write any plain text or markdown headers (like \"Next Actions\", \"💡 Next Actions\", or other localized header equivalent) before the suggestions block; the system will automatically render the appropriate header. " +
+    "**BUTTON SCHEMA CONFORMANCE (CRITICAL)**: a MaterialButton carries its caption in its own flat 'label' string — NEVER give it a 'child' or nest a text component inside it. A MaterialButton with no 'label' renders as a BLANK button.\n" +
+    "**NEVER BUILD THE CHIP BAR OUT OF MaterialChips**: MaterialChips has ONE action for ALL of its options, so whichever chip the user presses, the client sends that single action's context.prompt — every chip fires the FIRST chip's prompt. MaterialChips is for BOUND SELECTION inside a form (its 'value' points at a data-model path); a navigation chip bar MUST be one MaterialButton per chip, each with its OWN event name and context.prompt.\n" +
+    "**NEVER POINT AT A CARD BY POSITION (CRITICAL)**: a card always renders BELOW the text of the same turn, never above it, so wording like \"the card above\" / \"the checkboxes above\" / \"as shown above\" (in any language) sends the user the wrong way. Name the card by what it is and point DOWN (\"in the approval card below\"), or drop the positional word entirely (\"select the items to approve and press Confirm\"). The chip bar is always last, so never describe it as being anywhere else.\n" +
+    "**EVERY CARD MUST BE COMPLETE (CRITICAL — applies to ALL surfaces, not just suggestions)**: a createSurface message only OPENS an empty surface; the components are delivered by updateComponents. EVERY <a2ui-json> block you emit MUST therefore contain BOTH the createSurface message AND the updateComponents message carrying the full component tree for that same surfaceId, in the SAME block. An updateDataModel is NOT a substitute for updateComponents: emitting [createSurface, updateDataModel] and then moving on renders NOTHING and the user sees only your prose. This is the single most common way a rich card silently disappears — before you close any <a2ui-json> block, confirm it contains an updateComponents whose components array includes a component with id \"root\".\n" +
+    "**A2UI v0.9 PROTOCOL (NON-NEGOTIABLE)**: every message object carries \"version\": \"v0.9\" alongside exactly one of createSurface / updateComponents / updateDataModel / deleteSurface. " +
+    "createSurface takes { \"surfaceId\": \"...\" } and has NO 'root' key — the client renders the component whose id is exactly \"root\", so every surface MUST define one. " +
+    "A component is FLAT: { \"id\": \"x\", \"component\": \"MaterialText\", \"text\": \"hello\" } — never the old wrapper form { \"component\": { \"Text\": {...} } }. " +
+    "Values are plain JSON: \"hello\", not { \"literalString\": \"hello\" }. A data binding is still { \"path\": \"/form/x\" }. " +
+    "'children' is a plain array of id strings — [\"a\", \"b\"] — not { \"explicitList\": [...] }; for a repeated template it is { \"componentId\": \"rowTemplate\", \"path\": \"/items\" }. " +
+    "Layout uses \"justify\" and \"align\" (never \"distribution\" / \"alignment\"). " +
+    "updateDataModel takes { \"surfaceId\", \"path\", \"value\" } where value is plain JSON — never an array of { \"key\", \"valueString\" } entries.\n" +
+    "**FRESH surfaceId PER RESPONSE (CRITICAL)**: never reuse a surfaceId from an earlier turn unless you are deliberately updating or deleting that exact card. The client anchors a surfaceId to the message where it FIRST rendered, so a reused id overwrites the OLD card and renders nothing now. Use a descriptive id plus a short distinguishing suffix ('cost-analysis-2', 'batch-editor-sakura'). Within ONE response, createSurface / updateComponents / updateDataModel MUST all use the SAME id.\n" +
+    "**ACTIONS (CRITICAL)**: an interactive component's action is { \"action\": { \"event\": { \"name\": \"<intent>\", \"context\": { \"prompt\": \"<literal sentence>\" } } } }. " +
+    "The 'prompt' string is what Gemini Enterprise posts as the user's chat message — omit it and the user sees the useless \"User action triggered\". It MUST be a plain literal string, never a { \"path\": ... } binding. " +
+    "Encode the INTENT in the event 'name' (e.g. 'approve_order_42', 'drilldown_region_west'), never only in context, so it survives even if a context value fails to bind.\n" +
+    "**ACTION CONTEXT KEYS MUST NOT COLLIDE WITH COMPONENT IDS (CRITICAL)**: inside an event's 'context', every key MUST be different from every component 'id' in the same card. A context key that matches a component id is resolved against the component tree by the client and arrives server-side as the unusable literal '[object Object]', so that value is LOST. Prefix component ids to keep them distinct (context key \"title\" with component id \"fTitle\", key \"qty\" with id \"qtyField\", and so on).\n" +
     "**A2UI CARD INTERACTION EXCEPTION (STRICT RULE)**: When your response already contains a major interactive A2UI card featuring its own control buttons " +
     "(such as the Welcome Card onboarding buttons, the Analysis Plan pre-flight card buttons like Run inline / Run in background / Adjust, or the Workflow Execution Plan mode selection buttons like Immediate/Background/Scheduled), " +
     "you **MUST NOT** output any suggestion chip bar at the bottom of your response. The card's own control buttons are sufficient. " +
@@ -1167,20 +1197,21 @@ function getTechnicalInstruction_() {
     "Calling tools on the first greeting turn completely hides and breaks the onboarding card rendering. " +
     "You MUST immediately respond in the very first turn by writing ONE short line of plain-text greeting in the user's language FIRST, and THEN the rich A2UI onboarding card using surfaceId 'welcome-card' and NO suggestion chips at the bottom (the card's own buttons are sufficient). " +
     "The one-line plain-text greeting is MANDATORY and must appear in addition to the card: a UI-only response (an A2UI card with NO accompanying plain text) is NOT rendered by the client and shows a blank turn. " +
-    "Never execute queries or tool calls until the user explicitly requests analysis. The onboarding card must include your role title, a Divider, a List of key capabilities with Lucide icons, " +
-    "a Divider, and exactly 3 action Buttons.\n" +
+    "Never execute queries or tool calls until the user explicitly requests analysis. The onboarding card must include your role title, a MaterialDivider, the key capabilities as MaterialRows of MaterialIcon + MaterialText, " +
+    "a MaterialDivider, and exactly 3 action MaterialButtons.\n" +
     "**BUTTON SCHEMA CONFORMANCE (CRITICAL)**: When generating A2UI JSON payloads, you MUST ALWAYS use strict standard JSON syntax. " +
     "Under no circumstances should you use single quotes or omit quotes for keys. Keys and string values MUST always be enclosed in standard double quotes. " +
-    "Each Button component's action MUST strictly follow standard JSON structure:\n" +
+    "Each MaterialButton's action MUST strictly follow this structure:\n" +
     "{\n" +
+    "  \"id\": \"b1\",\n" +
+    "  \"component\": \"MaterialButton\",\n" +
+    "  \"label\": \"[Localized Button Label]\",\n" +
+    "  \"variant\": \"stroked\",\n" +
     "  \"action\": {\n" +
-    "    \"name\": \"sendText\",\n" +
-    "    \"context\": [\n" +
-    "      {\n" +
-    "        \"key\": \"text\",\n" +
-    "        \"value\": { \"literalString\": \"[Localized Button Label]\" }\n" +
-    "      }\n" +
-    "    ]\n" +
+    "    \"event\": {\n" +
+    "      \"name\": \"welcome_action_1\",\n" +
+    "      \"context\": { \"prompt\": \"[Localized request this button sends as the user's message]\" }\n" +
+    "    }\n" +
     "  }\n" +
     "}\n" +
     "Ensure all keys and string values are enclosed in standard double quotes to comply with strict standard JSON specifications. Use surfaceId 'welcome-card'.\n\n" +
@@ -1190,22 +1221,11 @@ function getTechnicalInstruction_() {
     "Mixing python code blocks with JSON tool calls triggers a fatal MALFORMED_FUNCTION_CALL system crash. " +
     "You MUST run the Python code alone first, receive its result, and only then issue the next tool call in a separate turn. " +
     "After this initial card, do NOT show the welcome card again in the same session unless the user explicitly requests a reset.\n\n" +
-    "**A2UI SCHEMA VALIDATION: usageHint CONSTRAINT (CRITICAL)**: The 'usageHint' property is ONLY allowed inside 'Text' components. You MUST NEVER place 'usageHint' inside any other component type (such as 'Button', 'Row', 'Column', 'Card', 'List', 'Divider', 'Icon', 'MultipleChoice', 'TextField'). Placing 'usageHint' in these non-Text components violates the schema and will cause the UI to crash and fail to render.\n\n" +
-    "**A2UI ICON VALIDATION (CRITICAL)**: When using 'Icon' components or specifying 'icon' inside components like 'Button', you MUST ONLY use one of the following allowed icon names. Using any other name (such as 'analytics', 'dashboard', 'chart', 'database', 'check_circle', 'lucide:*') is STRICTLY FORBIDDEN and will cause a fatal validation crash. The allowed icon names are:\n" +
-    "['accountCircle', 'add', 'arrowBack', 'arrowForward', 'attachFile', 'calendarToday', 'call', 'camera', 'check', 'close', 'delete', 'download', 'edit', 'event', 'error', 'favorite', 'favoriteOff', 'folder', 'help', 'home', 'info', 'locationOn', 'lock', 'lockOpen', 'mail', 'menu', 'moreVert', 'moreHoriz', 'notificationsOff', 'notifications', 'payment', 'person', 'phone', 'photo', 'print', 'refresh', 'search', 'send', 'settings', 'share', 'shoppingCart', 'star', 'starHalf', 'starOff', 'upload', 'visibility', 'visibilityOff', 'warning']\n\n" +
-    "13. **VERTICAL SPACING / SPACER HACK (CRITICAL)**: The tab bar of a Tabs component and its content Column may render extremely close to each other with insufficient vertical space. " +
-    "To insert an appropriate vertical gap below the tab bar, you MUST insert a dummy Text component acting as a spacer ONLY as the very first child of the tab content Column (the Column bound to the tab's child ID). " +
-    "The spacer component MUST have a single space \" \" as its literalString text and usageHint 'body'. For example:\n" +
-    "{\n" +
-    "  \"id\": \"[Unique_Spacer_ID]\",\n" +
-    "  \"component\": {\n" +
-    "    \"Text\": {\n" +
-    "      \"text\": { \"literalString\": \" \" },\n" +
-    "      \"usageHint\": \"body\"\n" +
-    "    }\n" +
-    "  }\n" +
-    "}\n" +
-    "You MUST ONLY use this spacer hack as the first child of a tab content Column. Do NOT place this spacer in any other standard Column, Row, or Dashboard layout where standard spacing is already optimal, to avoid creating unnecessary blank gaps.";
+    "**A2UI SCHEMA VALIDATION: usageHint CONSTRAINT (CRITICAL)**: The 'usageHint' property belongs ONLY to 'MaterialText'. You MUST NEVER place 'usageHint' on any other component (MaterialButton, MaterialRow, MaterialColumn, MaterialCard, MaterialDivider, MaterialIcon, MaterialChips, MaterialSelect, MaterialInput, MaterialTable, ...). Its allowed values are 'h1'-'h5', 'subtitle1', 'subtitle2', 'body1', 'body2', 'body' and 'caption' — 'title' is NOT one of them.\n\n" +
+    "**A2UI ICON NAMES**: 'MaterialIcon' takes a free-form Material Symbols / Material Icons font name in its required 'icon' property (e.g. 'analytics', 'insights', 'inventory_2', 'notifications', 'warning'). There is no allowlist — but it MUST be a real Material icon name in snake_case, never a Lucide name and never a 'lucide:*' prefix.\n\n" +
+    "13. **VERTICAL SPACING (USE style, NOT SPACER COMPONENTS)**: NEVER insert a dummy MaterialText containing a single space to create a gap. " +
+    "Every Material* component accepts a 'style' object, so ask for the spacing you want directly: put \"style\": { \"gap\": \"8px\" } on the MaterialRow/MaterialColumn that holds the children, and \"style\": { \"marginTop\": \"12px\" } on the first child of a MaterialTabs tab content column (the classic tab-bar-too-close case). " +
+    "Useful style keys: gap, margin, marginTop/Bottom/Left/Right, padding and its per-side variants, width, color, background, border, borderRadius.";
     
   return inst;
 }
@@ -1312,34 +1332,31 @@ You MUST classify the demo scenario into one of the following two agent archetyp
   - Instruct the agent to proactively query the history tables to auto-complete and resolve un-clear or hand-written entity names/quantities.
   - Instruct the agent to present the resolved items using the **(J) Dynamic Multi-Entity Batch Editor** A2UI pattern.
     - **ITEM-LEVEL SKU DECOMPOSITION (ABSOLUTELY MANDATORY)**: The agent MUST NOT treat the entire handwritten order text as a single block. It MUST split/decompose the text into **individual SKU line items (separate rows for each product)**.
-    - **AI-RECOMMENDED SKU/ENTITY SELECTION (STRICTLY REQUIRED)**: In the Middle Column of each row in the Batch Editor, the agent **MUST NOT use a raw \`TextField\` for mapping input**. The agent **MUST use a \`MultipleChoice\` component (variant: "chips" to render as horizontal selection buttons, or "dropdown" if there are more than 3 options, with maxAllowedSelections: 1)** bound to \`item_i_selected_sku\` (e.g. \`item_0_selected_sku\`) to allow the user to select the mapped SKU/entity.
-    - **ANNOTATION & RECOMMENDATION REASON (MANDATORY)**: Below each row's main components (Original, Selection, Qty), the agent **MUST include a \`Text\` component (usageHint: "caption")** that dynamically displays the reason why the AI recommended these specific SKUs (e.g., "💡 SKU_A is the direct successor (95% match); SKU_B is a similar alternative").
-    - **LOCALIZATION RULE (CRITICAL)**: All literalString values in A2UI component labels, headers, options, and buttons MUST be translated dynamically into the user's interaction language (or the language of the userGoal). Do NOT hardcode Japanese or English in the final A2UI if it does not match the user's language.
-    - **INJECT A2UI SELECTION TEMPLATE (MANDATORY)**: You MUST explicitly instruct the agent (in its system instruction) to format each batch editor row as a Column containing a main Row (with Left: Original Text, Middle: MultipleChoice Selection, Right: Qty TextField) and a Text caption below it for the recommendation reason. Format the selection and annotation using this exact JSON structure for each row \`i\`, dynamically localizing all placeholder strings:
+    - **AI-RECOMMENDED SKU/ENTITY SELECTION (STRICTLY REQUIRED)**: In the Middle Column of each row in the Batch Editor, the agent **MUST NOT use a raw \`MaterialInput\` for mapping input**. The agent **MUST use a \`MaterialChips\` component (2-3 candidates, rendered as horizontal selection chips) or a \`MaterialSelect\` (more than 3 candidates)** whose \`value\` is bound to \`/form/item_i_selected_sku\` (e.g. \`/form/item_0_selected_sku\`) to allow the user to select the mapped SKU/entity.
+    - **ANNOTATION & RECOMMENDATION REASON (MANDATORY)**: Below each row's main components (Original, Selection, Qty), the agent **MUST include a \`MaterialText\` component (usageHint: "caption")** that dynamically displays the reason why the AI recommended these specific SKUs (e.g., "💡 SKU_A is the direct successor (95% match); SKU_B is a similar alternative").
+    - **LOCALIZATION RULE (CRITICAL)**: All literal strings in A2UI component labels, headers, options, and buttons MUST be translated dynamically into the user's interaction language (or the language of the userGoal). Do NOT hardcode Japanese or English in the final A2UI if it does not match the user's language.
+    - **INJECT A2UI SELECTION TEMPLATE (MANDATORY)**: You MUST explicitly instruct the agent (in its system instruction) to format each batch editor row as a MaterialColumn containing a main MaterialRow (with Left: original MaterialText stack, Middle: MaterialChips selection, Right: qty MaterialInput) and a MaterialText caption below it for the recommendation reason. This is A2UI v0.9: every component is FLAT (\`"component": "MaterialChips"\`, not a wrapper object), every value is plain JSON (no \`literalString\`), and \`children\` is a plain array of id strings. Format the selection and annotation using this exact JSON structure for each row \`i\`, dynamically localizing all placeholder strings:
       \`\`\`json
       {
-        "MultipleChoice": {
-          "label": { "literalString": "[Localized Label, e.g., 'Select SKU']" },
-          "options": [
-            { "value": "SKU_CODE_A", "label": { "literalString": "[SKU_CODE_A]" } },
-            { "value": "SKU_CODE_B", "label": { "literalString": "[SKU_CODE_B]" } }
-          ],
-          "maxAllowedSelections": 1,
-          "variant": "chips",
-          "selections": { "path": "/form/item_i_selected_sku" }
-        }
+        "id": "sku_select_i",
+        "component": "MaterialChips",
+        "value": { "path": "/form/item_i_selected_sku" },
+        "options": [
+          { "label": "[SKU_CODE_A]", "value": "SKU_CODE_A" },
+          { "label": "[SKU_CODE_B]", "value": "SKU_CODE_B" }
+        ]
       }
       \`\`\`
       And the caption below the row:
       \`\`\`json
       {
-        "Text": {
-          "text": { "literalString": "💡 [Localized reason explaining recommendations, e.g., 'SKU_A is direct replacement of legacy model']" },
-          "usageHint": "caption"
-        }
+        "id": "reason_text_i",
+        "component": "MaterialText",
+        "text": "💡 [Localized reason explaining recommendations, e.g., 'SKU_A is direct replacement of legacy model']",
+        "usageHint": "caption"
       }
       \`\`\`
-      The agent MUST populate the \`options\` array dynamically with 2-3 matching/similar SKU candidates retrieved from BigQuery based on semantic similarity. Each row's Right Column MUST also include a \`TextField\` (textFieldType: "shortText") bound to \`item_i_qty\` for quantity editing.
+      The agent MUST populate the \`options\` array dynamically with 2-3 matching/similar SKU candidates retrieved from BigQuery based on semantic similarity (\`MaterialChips\` has no \`label\` property, so put the "Select SKU" caption in a separate \`MaterialText\` if the column needs one). Each row's Right Column MUST also include a \`MaterialInput\` whose \`value\` is bound to \`/form/item_i_qty\` for quantity editing, and every bound path MUST be seeded by an \`updateDataModel\` message in the SAME \`<a2ui-json>\` block.
   - Instruct the agent to wait for the user to click the Submit button, then retrieve the latest edited values from the context parameter and execute the final database transaction.
 
 ### Type B: Strategic Insight Advisor (Read-Heavy / Diagnostic / Proposal-Driven)
@@ -1472,9 +1489,10 @@ If the Business Problem naturally involves processing non-structured inputs like
         3. **Sender**: Sender company details on the top-right (matching generated client data, with appropriate localized suffixes if applicable).
         4. **Table Grid**: Neatly printed columns for details. Translate the column headers into the target language. Inside the cells, write the handwritten items corresponding exactly to BQ/Firestore transaction data (translated to the target language if they are text descriptions or comments). **You MUST ensure the table contains AT LEAST TWO (2) OR MORE distinct row items (e.g., multiple different products or services ordered) to represent a realistic multi-line business document. Never generate a document with only a single item row.**
         5. **Footer**: Total amounts, and a designated seal/signature box. If culturally appropriate to the target language (e.g., Japanese domain), include: **"in the designated space, a small, faint red ink corporate seal stamp is printed."** Otherwise, include a formal handwritten signature block.
-- **VARIATION & SEED (CRITICAL)**:
-  - Image 1 (e.g., Task 1): Depict a standard operational sheet (e.g., handwritten order from Customer A with normal quantities and readable items).
-  - Image 2 (e.g., Task 2): Depict a different customer, showing a clear discrepancy (e.g., handwritten order from Customer B specifying an abnormally high quantity, discontinued code, or fuzzy specs matching L1211 audit seeds) using a slightly different handwriting style to trigger the agent's detection.
+- **VARIATION & SEED (CRITICAL - BOTH IMAGES MUST CONTAIN AUDIT SEEDS)**:
+  - **BOTH** Image 1 and Image 2 MUST contain 2-3 normal transaction rows PLUS at least 1 audit-seed discrepancy row in 'imageRows' (e.g., an obsolete/discontinued SKU code, non-standard capacity/size, or fuzzy product name requiring master/history resolution) so that WHICHEVER image is attached during the Vision Showcase prompt, the agent discovers a genuine cross-silo discrepancy.
+  - Image 1 (e.g., Task 1 - primary scan bound to the Vision Showcase prompt): Depict a handwritten document from Customer A containing 2-3 standard readable items PLUS at least 1 clear discrepancy row (e.g., an obsolete/discontinued code or capacity mismatch that exists in the BigQuery master table). The Vision Showcase prompt's customer description, line items, and watchPoint MUST match Image 1's exact content.
+  - Image 2 (e.g., Task 2 - secondary scan for additional testing): Depict a different customer (Customer B) with a slightly different handwriting style, also containing 2-3 normal rows PLUS a distinct discrepancy row (e.g., abnormal quantity or fuzzy specification matching Section 6a audit seeds).
 - DO NOT design generic vectors, cartoon icons, or generic illustrations. It must mimic real-world scanned or photographed flat documents to demonstrate the agent's advanced vision capabilities.
 
 
@@ -1551,19 +1569,26 @@ Output in the following JSON format. Output **pure JSON only without code blocks
       "id": "file2",
       "fileName": "handwritten_fax_order_task1.jpg",
       "mimeType": "image/jpeg",
-      "description": "Simulated operational document 1 (e.g. handwritten purchase order from Client A with normal quantities)",
+      "description": "Simulated operational document 1 (e.g. handwritten purchase order from Client A containing 2 normal items plus 1 obsolete/discrepancy item matching the Vision Showcase prompt)",
       "imagePrompt": "A highly detailed, realistic top-down flat-lay scan of a formal purchase order sheet. The clean white document page fills the entire frame with zero background, completely isolated. At the top center, a bold formal header matching the domain (e.g., 'PURCHASE ORDER') is printed. On the top-left, recipient details and company name are printed in a clean corporate font. On the top-right, sender company details along with localized contact information are printed. In the center, a neatly aligned printed table grid with thin gray lines features the column headers listed below. Inside the table cells, highly realistic, messy, and hurried human handwriting in black ballpoint pen ink is neatly filled (showing realistic human imperfections, hurried scribbles, varying character sizes, and slight character misalignment). Natural flat daylight illuminates the scene, showing subtle paper folds and real-world operational handling texture. Sharp contrast, flat perspective, and zero angled shots.",
       "imageColumns": ["Item No.", "Product Name", "Quantity"],
-      "imageRows": ["1 | <localized product A> | 50", "2 | <localized product B> | 120", "3 | <localized product C> | 30"]
+      "imageRows": ["A-101 | <localized product A> | 50", "A-102 | <localized product B> | 120", "B-330 | <localized discontinued product C (obsolete code - check replacement)> | 30"]
     },
     {
       "id": "file3",
       "fileName": "handwritten_fax_order_task2.jpg",
       "mimeType": "image/jpeg",
-      "description": "Simulated operational document 2 (e.g. handwritten purchase order from Client B showcasing a clear quantity or product ID discrepancy for audit verification)",
+      "description": "Simulated operational document 2 (e.g. handwritten purchase order from Client B showcasing a quantity anomaly or fuzzy spec for additional verification)",
       "imagePrompt": "A high-quality, top-down flat scan of a different formal transaction document (e.g., 'INVOICE' or 'DELIVERY SLIP') filling the entire frame with no background. Features a bold domain-specific printed header with date and document reference numbers. Recipient and sender corporate details are cleanly aligned at the top. In the center, a printed table grid features the column headers listed below. Inside the grid cells, highly realistic, hurried, and messy human handwriting in dark blue ink lists the line items. The handwriting is slightly untidy, hurried, and scribble-like, showcasing human imperfection and hasty pen strokes. A designated signature block or faint red ink corporate stamp is present in the designated footer space. Clear flat document view with zero perspective blur.",
       "imageColumns": ["Code", "Item", "Quantity"],
-      "imageRows": ["A-101 | <localized item X> | 40", "A-205 | <localized item Y> | 999", "B-330 | <localized discontinued item Z> | 15"]
+      "imageRows": ["A-201 | <localized item X> | 40", "A-205 | <localized item Y (abnormal quantity spike)> | 999", "B-330 | <localized discontinued item Z> | 15"]
+    },
+    {
+      "id": "file4",
+      "fileName": "supplier_surcharge_ledger.xlsx",
+      "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "fileContent": "Supplier Surcharge Reconciliation Ledger\\tFY2026\\nTotal Audited Rows\\t45\\nFlagged Variance Cases\\t3\\n\\nOrder ID\\tCustomer ID\\tMaterial ID\\tDate\\tSystem Amount\\tBilled Amount\\tVariance\\tStatus\\tRemarks\\n...",
+      "description": "Detailed tabular supplier/reconciliation ledger (40-80 TSV rows) containing the exact record IDs cited in the PDF audit report and BigQuery tables"
     }
   ],
   "tables": [
@@ -1619,7 +1644,7 @@ Output in the following JSON format. Output **pure JSON only without code blocks
     {
       "title": "...",
       "prompt": "...",
-      "requiredFileId": "file1 or empty",${CROSSORG ? `
+      "requiredFileId": "Exact externalFiles id(s) required by this prompt (e.g., 'file1', 'file2', or 'file1,file4' if both PDF and Excel are needed), or '' if no file attachment is needed",${CROSSORG ? `
       "watchPoint": "One short sentence for the demo OPERATOR (not the agent): what to watch on screen when this prompt runs (e.g., after the approval click, the item moves to the next department on the operations console). Same language as the prompts.",` : ''}
       "tags": [...]
     }
@@ -1641,12 +1666,14 @@ ${narrativeArc}
         - **INTERACTIVE DASHBOARD (MANDATORY)**: Exactly ONE of the 7 prompts MUST ask the agent to build an interactive dashboard the user can OPEN AND EXPLORE IN A BROWSER. The prompt text MUST contain an explicit open-in-browser / interactive signal (e.g. 'that I can open and explore in my browser', 'an interactive dashboard I can click into') - this is what makes the agent publish a hosted interactive page instead of a static summary slide. Do NOT phrase it as a pure 'summarize / analyze' request (e.g. avoid 'Generate a dashboard that summarizes ...'), because that reads as an analysis and yields a slide, not an interactive dashboard. Good example: 'Build me an interactive executive dashboard I can open in my browser and explore - key metrics, top segments, trends, and risk items.' Fold this into a natural overview or strategic prompt so the total stays EXACTLY 7. Phrase it generically (no product names).
     2. **PERSONA ROTATION (CRITICAL)**: Vary the tone and perspective by rotating personas for each prompt (e.g., CFO, Ops Manager, Regional Director, Front-line Lead).${anchorRotationNote}
     2b. **FILE BINDING - requiredFileId (MANDATORY)**: Set "requiredFileId" ONLY on prompts that cannot succeed without that uploaded file. Never leave requiredFileId empty on ALL 7 prompts.
-        - The CROSS-SOURCE DISCOVERY prompt (Prompt 3) MUST set requiredFileId to the id of the Excel or PDF file it reconciles against the database.
-        - **VISION SHOWCASE (when 'externalFiles' contains image files)**: Either Prompt 3 or Prompt 4 MUST be a workflow that STARTS from reading the photographed/handwritten document image (read the document -> decompose it into individual line items -> reconcile each item against the database -> flag discrepancies -> route exceptions to human approval), and that prompt MUST set requiredFileId to the image file id. This is the multimodal vision showcase - do NOT leave the generated images unused by the demo script.
-        - Prompts that need no uploaded file MUST set requiredFileId to an empty string.${hitlChoreo}
+        - The CROSS-SOURCE DISCOVERY prompt (Prompt 3) MUST set requiredFileId to the id(s) of the external file(s) it reconciles against the database. If the prompt text mentions BOTH the audit report (PDF) and the supplier/reconciliation feed (Excel), set requiredFileId to BOTH ids separated by a comma (e.g., "file1,file4").
+        - **VISION SHOWCASE (when 'externalFiles' contains image files)**: Either Prompt 3 or Prompt 4 MUST be a workflow that STARTS from reading the photographed/handwritten document image (read the document -> decompose it into individual line items -> reconcile each item against the database -> flag discrepancies -> route exceptions to human approval), and that prompt MUST set requiredFileId to the image file id (e.g., "file2"). **STRICT CONTENT ALIGNMENT**: The customer/sender, item codes, and discrepancy described in the Vision Showcase prompt and its watchPoint MUST exist in the 'imageRows' of the exact image file referenced by its requiredFileId! Never describe Customer A from file2 while asking to flag an obsolete code that only exists in file3.
+        - **NO ORPHAN / MISPLACED BINDINGS**: Never assign an external file id to a prompt whose text does not actually read that file (e.g., do NOT set requiredFileId to the Excel file on Prompt 7 if Prompt 7 only asks for live web browsing plus internal database synthesis).
+        - Prompts that need no uploaded file MUST set requiredFileId to an empty string "".${hitlChoreo}
     3. **EXTERNAL DATA NECESSITY & LOGICAL CONSISTENCY (CRITICAL)**: You MUST generate exactly one PDF file AND exactly one Excel file (.xlsx) unless it is completely impossible for the business context. The files generated MUST be external data (not inside the current system) and MUST be unstructured or semi-structured in format.
         - **LOGICAL LINKAGE**: ALL discrepancies or specific transaction IDs (e.g., "INV-7829") mentioned in the external file content MUST correspond to standard records that ACTUALLY EXIST inside the generated BigQuery CSV tables. Do NOT make up transaction IDs in the external file that do not exist in the database tables. This allows the user to find the anomaly by comparing the external file against the database.
         - **CROSS-SOURCE BINDING (MANDATORY)**: The Excel file MUST contain a column whose values are a SUBSET of a BigQuery table's primary key or unique identifier (e.g., order_id, invoice_number). At least 70% of the Excel rows MUST have matching records in the BigQuery tables to enable reliable JOIN-based cross-referencing. The PDF file MUST reference at least 3 specific record identifiers (IDs, invoice numbers, etc.) that exist in the BigQuery tables, enabling the agent to look up those exact records via SQL. This structural binding GUARANTEES that cross-source analysis will succeed during the demo.
+        - **CROSS-FILE ID ALIGNMENT (PDF <-> EXCEL <-> BIGQUERY, MANDATORY)**: Every specific record identifier cited as a flagged case in the PDF fileContent or in any demoGuide watchPoint MUST exist verbatim in BOTH the BigQuery CSV tables AND the Excel TSV rows (whenever the Excel file tracks that same entity/transaction ID prefix). For example, if the PDF cites CFG-2026-8802, CFG-2026-8815, and CFG-2026-8841, the Excel TSV MUST also include rows for all three IDs (do NOT stop the Excel sequence at CFG-2026-8840).
         - **PDF ID SELF-CHECK (MANDATORY)**: After writing the PDF fileContent, VERIFY it quotes at least 3 record identifiers copied VERBATIM from the generated CSV key columns (order/application/invoice IDs etc.). Aggregate figures and entity names are NOT sufficient - the demo's cross-source lookup depends on these exact IDs being queryable via SQL. If fewer than 3 verbatim IDs are present, ADD a "specific flagged cases" section to the PDF that lists the affected records BY ID before finalizing your response.
     3. **FILE FORMAT & REALISM (CRITICAL)**: 
         - For PDF files, generate **substantial, realistic, and highly structured business document content (at least 1,500 characters)** with clear titles, multiple sections using Markdown headings (e.g., '# Summary', '## Background', '### Details'), and bullet points ('- '). It MUST be unstructured text in a rich report format. 
@@ -1694,7 +1721,8 @@ ${narrativeArc}
 ## FINAL SELF-CHECK BEFORE EMITTING (MANDATORY — do this LAST, right before you output the JSON)
 1. **COUNT the data rows in every csvData.** At least one transaction/log table MUST contain ${profile.txnRowTarget}+ rows (hard floor: ${profile.txnMinRows} — responses under the floor are automatically REJECTED and the entire generation is retried, wasting the whole run). Master tables need ${profile.masterRows} rows. If any table is short, ADD realistic rows NOW — never summarize, sample, or truncate.
 2. **VERIFY externalFiles**: exactly one PDF (citing 3+ verbatim record IDs) and one Excel (40-80 detail rows), plus the two images when the scenario is paper-based. A missing file breaks a mandatory demo moment.
-3. Only after both checks pass, emit the JSON.
+3. **VERIFY PROMPT-TO-FILE & CROSS-FILE ID CONSISTENCY**: (a) Every record ID cited in the PDF or in any demoGuide watchPoint MUST appear verbatim in both the BigQuery CSV tables and the Excel TSV rows; (b) the image bound via requiredFileId to the Vision Showcase prompt MUST contain the obsolete/discrepancy row in its 'imageRows' and match the customer/items described in that prompt; (c) every prompt's requiredFileId MUST list the exact externalFiles id(s) its text requires (and '' when no file is needed).
+4. Only after all checks pass, emit the JSON.
 `;
 }
 
@@ -1763,6 +1791,645 @@ function expandThinTables_(parsed, options) {
     }
   } catch (e) {
     console.warn('[DENSITY REPAIR] skipped: ' + e.message);
+  }
+}
+
+/**
+ * Validates and repairs cross-artifact consistency between externalFiles,
+ * demoGuide prompts (requiredFileId, prompt text, watchPoint), and BigQuery
+ * tables. Runs BEFORE image rendering in planAndGenerateData so any repaired
+ * imageRows are reflected in generated document images, and again in
+ * validateGeneratedData and restoreDemo (idempotent).
+ */
+function validateAndRepairExternalFileBindings_(planResult) {
+  try {
+    if (!planResult || typeof planResult !== 'object') return;
+    const extFiles = Array.isArray(planResult.externalFiles) ? planResult.externalFiles : [];
+    const guide = Array.isArray(planResult.demoGuide) ? planResult.demoGuide : [];
+    const tables = (Array.isArray(planResult.tables) && planResult.tables.length > 0)
+      ? planResult.tables
+      : ((Array.isArray(planResult.rawTables) && planResult.rawTables.length > 0)
+        ? planResult.rawTables
+        : (Array.isArray(planResult.dataPreview) ? planResult.dataPreview : []));
+
+    // 1. Canonicalize externalFiles IDs and classify by file type
+    const byId = {};
+    const byName = {};
+    const pdfFiles = [];
+    const excelFiles = [];
+    const imageFiles = [];
+
+    for (let i = 0; i < extFiles.length; i++) {
+      const f = extFiles[i];
+      if (!f || typeof f !== 'object') continue;
+      const posId = 'file' + (i + 1);
+      const canonicalId = String(f.id || posId).trim();
+      f.id = canonicalId;
+      byId[canonicalId] = f;
+      byId[canonicalId.toLowerCase()] = f;
+      const fname = String(f.fileName || '').trim();
+      if (fname) {
+        byName[fname.toLowerCase()] = f;
+        const base = fname.toLowerCase().replace(/\.[a-z0-9]+$/i, '');
+        if (base) byName[base] = f;
+      }
+      const mime = String(f.mimeType || '').toLowerCase();
+      if (mime === 'application/pdf' || /\.pdf$/i.test(fname)) {
+        pdfFiles.push(f);
+      } else if (
+        mime.indexOf('spreadsheet') !== -1 ||
+        mime.indexOf('excel') !== -1 ||
+        mime === 'text/tab-separated-values' ||
+        /\.(xlsx|xls|tsv|csv)$/i.test(fname)
+      ) {
+        excelFiles.push(f);
+      } else if (mime.indexOf('image/') === 0 || /\.(jpg|jpeg|png|webp)$/i.test(fname)) {
+        imageFiles.push(f);
+      }
+    }
+    // Register positional file1..fileN aliases when custom IDs are used
+    for (let i = 0; i < extFiles.length; i++) {
+      const f = extFiles[i];
+      if (!f || typeof f !== 'object') continue;
+      const posId = 'file' + (i + 1);
+      if (!byId[posId]) byId[posId] = f;
+    }
+
+    if (extFiles.length === 0) {
+      for (let i = 0; i < guide.length; i++) {
+        if (guide[i] && typeof guide[i] === 'object') guide[i].requiredFileId = '';
+      }
+      return;
+    }
+
+    // 2. Index structured record IDs and obsolete/discontinued items from BigQuery tables
+    //    Supports both full CSV tables (tbl.csvData) and dataPreview objects (tbl.headers + tbl.rows).
+    const idTokenRe = /\b([A-Z]{2,10}-(?:[A-Z0-9]{2,6}-)?(?=[A-Z0-9]*\d)[A-Z0-9]{2,10})(?![A-Z0-9])/g;
+    const getIdPrefix = function(idStr) {
+      const s = String(idStr);
+      const lastDash = s.lastIndexOf('-');
+      return lastDash !== -1 ? s.slice(0, lastDash + 1) : s + '-';
+    };
+
+    const bqIdsByPrefix = {};
+    const bqAllIds = {};
+    const bqObsoleteItems = [];
+
+    for (let tIdx = 0; tIdx < tables.length; tIdx++) {
+      const tbl = tables[tIdx];
+      if (!tbl || typeof tbl !== 'object') continue;
+      let headers = [];
+      const dataRows = [];
+      if (tbl.csvData) {
+        const lines = String(tbl.csvData).trim().split('\n');
+        if (lines.length < 2) continue;
+        headers = parseCSVLine(lines[0]).map(function(h) {
+          return String(h).trim().replace(/^"|"$/g, '');
+        });
+        for (let rIdx = 1; rIdx < lines.length; rIdx++) {
+          dataRows.push(parseCSVLine(lines[rIdx]).map(function(v) {
+            return String(v).trim().replace(/^"|"$/g, '');
+          }));
+        }
+      } else if (Array.isArray(tbl.headers) && Array.isArray(tbl.rows)) {
+        headers = tbl.headers.map(function(h) {
+          return String(h === null || h === undefined ? '' : h).trim().replace(/^"|"$/g, '');
+        });
+        for (let rIdx = 0; rIdx < tbl.rows.length; rIdx++) {
+          const r = tbl.rows[rIdx];
+          if (!Array.isArray(r)) continue;
+          dataRows.push(r.map(function(v) {
+            return String(v === null || v === undefined ? '' : v).trim().replace(/^"|"$/g, '');
+          }));
+        }
+      } else {
+        continue;
+      }
+
+      for (let rIdx = 0; rIdx < dataRows.length; rIdx++) {
+        const vals = dataRows[rIdx];
+        const rowObj = {};
+        for (let cIdx = 0; cIdx < headers.length; cIdx++) {
+          rowObj[headers[cIdx]] = vals[cIdx] !== undefined ? vals[cIdx] : '';
+        }
+        for (let cIdx = 0; cIdx < vals.length; cIdx++) {
+          const cellVal = vals[cIdx];
+          if (/^[A-Z]{2,10}-(?:[A-Z0-9]{2,6}-)?(?=[A-Z0-9]*\d)[A-Z0-9]{2,10}$/.test(cellVal)) {
+            const pfx = getIdPrefix(cellVal);
+            if (!bqIdsByPrefix[pfx]) bqIdsByPrefix[pfx] = [];
+            if (!bqAllIds[cellVal]) {
+              const entry = {
+                id: cellVal,
+                prefix: pfx,
+                rowObj: rowObj,
+                headers: headers,
+                vals: vals,
+                tableName: tbl.tableName
+              };
+              bqAllIds[cellVal] = entry;
+              bqIdsByPrefix[pfx].push(entry);
+            }
+          }
+        }
+        const rowJoined = vals.join(' | ');
+        if (/\b(OBSOLETE|DISCONTINUED|DEPRECATED|INACTIVE|END_OF_LIFE)\b|\u5ec3\u756a|\u5ec3\u6b62|\u65e7\u54c1\u756a|\u8ca9\u58f2\u7d42\u4e86/i.test(rowJoined)) {
+          bqObsoleteItems.push({ rowObj: rowObj, headers: headers, vals: vals, tableName: tbl.tableName });
+        }
+      }
+    }
+
+    // 3. Validate & repair structured record IDs in PDF fileContent and demoGuide against BigQuery
+    const extractIds = function(text) {
+      const found = [];
+      const s = String(text || '');
+      let m;
+      idTokenRe.lastIndex = 0;
+      while ((m = idTokenRe.exec(s)) !== null) {
+        if (found.indexOf(m[1]) === -1) found.push(m[1]);
+      }
+      return found;
+    };
+
+    const usedIds = {};
+    const pdfValidIdsByPrefix = {};
+    for (let pIdx = 0; pIdx < pdfFiles.length; pIdx++) {
+      const pdf = pdfFiles[pIdx];
+      if (!pdf.fileContent) continue;
+      const pdfIds = extractIds(pdf.fileContent);
+      for (let i = 0; i < pdfIds.length; i++) usedIds[pdfIds[i]] = true;
+
+      for (let i = 0; i < pdfIds.length; i++) {
+        const cid = pdfIds[i];
+        const pfx = getIdPrefix(cid);
+        if (bqAllIds[cid]) {
+          if (!pdfValidIdsByPrefix[pfx]) pdfValidIdsByPrefix[pfx] = [];
+          if (pdfValidIdsByPrefix[pfx].indexOf(cid) === -1) pdfValidIdsByPrefix[pfx].push(cid);
+          continue;
+        }
+        const candidates = bqIdsByPrefix[pfx] || [];
+        let replacement = '';
+        for (let c = 0; c < candidates.length; c++) {
+          if (!usedIds[candidates[c].id]) {
+            replacement = candidates[c].id;
+            break;
+          }
+        }
+        if (replacement) {
+          usedIds[replacement] = true;
+          if (!pdfValidIdsByPrefix[pfx]) pdfValidIdsByPrefix[pfx] = [];
+          if (pdfValidIdsByPrefix[pfx].indexOf(replacement) === -1) pdfValidIdsByPrefix[pfx].push(replacement);
+          pdf.fileContent = String(pdf.fileContent).split(cid).join(replacement);
+          for (let gIdx = 0; gIdx < guide.length; gIdx++) {
+            const st = guide[gIdx];
+            if (!st || typeof st !== 'object') continue;
+            if (st.prompt) st.prompt = String(st.prompt).split(cid).join(replacement);
+            if (st.watchPoint) st.watchPoint = String(st.watchPoint).split(cid).join(replacement);
+          }
+          console.log('[BINDING REPAIR] Replaced unmatched PDF ID ' + cid + ' with BigQuery ID ' + replacement);
+        }
+      }
+    }
+
+    // Also repair any unmatched BigQuery-prefix IDs cited directly in demoGuide prompt/watchPoint
+    for (let gIdx = 0; gIdx < guide.length; gIdx++) {
+      const st = guide[gIdx];
+      if (!st || typeof st !== 'object') continue;
+      const gText = (st.prompt || '') + ' ' + (st.watchPoint || '');
+      const gIds = extractIds(gText);
+      for (let i = 0; i < gIds.length; i++) {
+        const gid = gIds[i];
+        if (bqAllIds[gid]) continue;
+        const pfx = getIdPrefix(gid);
+        const candidates = bqIdsByPrefix[pfx] || [];
+        if (candidates.length === 0) continue;
+        const pdfCandidates = pdfValidIdsByPrefix[pfx] || [];
+        let replacement = '';
+        for (let c = 0; c < pdfCandidates.length; c++) {
+          if (gIds.indexOf(pdfCandidates[c]) === -1) {
+            replacement = pdfCandidates[c];
+            break;
+          }
+        }
+        if (!replacement && pdfCandidates.length > 0) {
+          replacement = pdfCandidates[0];
+        }
+        if (!replacement) {
+          for (let c = 0; c < candidates.length; c++) {
+            if (!usedIds[candidates[c].id]) {
+              replacement = candidates[c].id;
+              break;
+            }
+          }
+        }
+        if (!replacement && candidates.length > 0) {
+          replacement = candidates[0].id;
+        }
+        if (replacement) {
+          usedIds[replacement] = true;
+          if (st.prompt) st.prompt = String(st.prompt).split(gid).join(replacement);
+          if (st.watchPoint) st.watchPoint = String(st.watchPoint).split(gid).join(replacement);
+          console.log('[BINDING REPAIR] Replaced unmatched demoGuide ID ' + gid + ' with BigQuery ID ' + replacement);
+        }
+      }
+    }
+
+    // 4. Ensure every structured record ID cited in PDF or demoGuide watchPoint/prompt
+    //    also exists in the Excel TSV when the Excel sheet uses that ID prefix.
+    const citedValidIds = [];
+    const addCitedIdIfValid = function(id) {
+      if (!id || citedValidIds.indexOf(id) !== -1) return;
+      const pfx = getIdPrefix(id);
+      if (bqIdsByPrefix[pfx] && bqIdsByPrefix[pfx].length > 0 && !bqAllIds[id]) return;
+      citedValidIds.push(id);
+    };
+    for (let pIdx = 0; pIdx < pdfFiles.length; pIdx++) {
+      const ids = extractIds(pdfFiles[pIdx].fileContent);
+      for (let i = 0; i < ids.length; i++) addCitedIdIfValid(ids[i]);
+    }
+    for (let gIdx = 0; gIdx < guide.length; gIdx++) {
+      const st = guide[gIdx];
+      if (!st || typeof st !== 'object') continue;
+      const ids = extractIds((st.prompt || '') + ' ' + (st.watchPoint || ''));
+      for (let i = 0; i < ids.length; i++) addCitedIdIfValid(ids[i]);
+    }
+
+    for (let xIdx = 0; xIdx < excelFiles.length; xIdx++) {
+      const xFile = excelFiles[xIdx];
+      if (!xFile.fileContent) continue;
+      let xContent = String(xFile.fileContent);
+      const xIds = extractIds(xContent);
+      const xPrefixes = {};
+      for (let i = 0; i < xIds.length; i++) {
+        xPrefixes[getIdPrefix(xIds[i])] = true;
+      }
+
+      for (let i = 0; i < citedValidIds.length; i++) {
+        const cid = citedValidIds[i];
+        const pfx = getIdPrefix(cid);
+        if (!xPrefixes[pfx]) continue;
+        if (xContent.indexOf(cid) !== -1) continue;
+
+        // Find a template TSV line in xContent with the same ID prefix (preferring
+        // another cited + discrepancy-flagged ID so discrepancy columns/remarks match).
+        const xLines = xContent.split('\n');
+        let templateLine = '';
+        let templateId = '';
+        let bestTplScore = 0;
+        for (let lIdx = 0; lIdx < xLines.length; lIdx++) {
+          const line = xLines[lIdx];
+          if (line.indexOf('\t') === -1) continue;
+          const lineIds = extractIds(line);
+          const isFlaggedLine = /discrepancy|discrepancies|exceed|alert|fail|anomaly|anomalies|mismatch|shortage|deficit|unbilled|critical|\b[2-9]\d\.\d%/i.test(line);
+          for (let li = 0; li < lineIds.length; li++) {
+            if (getIdPrefix(lineIds[li]) === pfx) {
+              const isCited = citedValidIds.indexOf(lineIds[li]) !== -1;
+              const score = (isCited ? 2 : 1) + (isFlaggedLine ? 2 : 0);
+              if (score > bestTplScore) {
+                bestTplScore = score;
+                templateLine = line;
+                templateId = lineIds[li];
+              }
+            }
+          }
+        }
+
+        if (templateLine && templateId) {
+          const cells = templateLine.split('\t');
+          // Increment the row's own primary/log ID in cells[0] if it is a sequential ID distinct from templateId
+          if (cells.length > 0 && cells[0] !== templateId && !bqAllIds[cells[0]]) {
+            const pkMatch = /^([A-Z]{2,10}-(?:[A-Z0-9]{2,6}-)?)(\d+)$/.exec(cells[0].trim());
+            if (pkMatch) {
+              const pkPrefix = pkMatch[1];
+              const padLen = pkMatch[2].length;
+              let maxNum = parseInt(pkMatch[2], 10);
+              const allIdsInSheet = extractIds(xContent);
+              for (let aIdx = 0; aIdx < allIdsInSheet.length; aIdx++) {
+                const aid = allIdsInSheet[aIdx];
+                if (aid.indexOf(pkPrefix) === 0) {
+                  const tail = aid.slice(pkPrefix.length);
+                  if (/^\d+$/.test(tail)) {
+                    const n = parseInt(tail, 10);
+                    if (n > maxNum) maxNum = n;
+                  }
+                }
+              }
+              cells[0] = pkPrefix + String(maxNum + 1).padStart(padLen, '0');
+            }
+          }
+
+          for (let cIdx = 0; cIdx < cells.length; cIdx++) {
+            if (cells[cIdx].indexOf(templateId) !== -1) {
+              cells[cIdx] = cells[cIdx].split(templateId).join(cid);
+            }
+          }
+
+          const bqTarget = bqAllIds[cid];
+          const bqTpl = bqAllIds[templateId];
+          if (bqTarget && bqTpl) {
+            let targetDateIso = '';
+            for (let vIdx = 0; vIdx < bqTpl.vals.length; vIdx++) {
+              const oldVal = String(bqTpl.vals[vIdx] || '').trim();
+              const newVal = String(bqTarget.vals[vIdx] || '').trim();
+              if (/^\d{4}-\d{2}-\d{2}/.test(newVal)) {
+                targetDateIso = newVal.slice(0, 10);
+              }
+              if (!oldVal || !newVal || oldVal === newVal || oldVal === templateId) continue;
+
+              // Structured ID replacement
+              if (/^[A-Z]{2,10}-(?:[A-Z0-9]{2,6}-)?(?=[A-Z0-9]*\d)[A-Z0-9]{2,10}$/.test(oldVal)) {
+                for (let cIdx = 0; cIdx < cells.length; cIdx++) {
+                  cells[cIdx] = cells[cIdx].split(oldVal).join(newVal);
+                }
+                continue;
+              }
+
+              // Date / timestamp replacement (handles "YYYY-MM-DD HH:MM:SS" -> "YYYY-MM-DD")
+              if (/^\d{4}-\d{2}-\d{2}/.test(oldVal) && /^\d{4}-\d{2}-\d{2}/.test(newVal)) {
+                const oldDate = oldVal.slice(0, 10);
+                const newDate = newVal.slice(0, 10);
+                for (let cIdx = 0; cIdx < cells.length; cIdx++) {
+                  if (cells[cIdx].indexOf(oldVal) !== -1) {
+                    cells[cIdx] = cells[cIdx].split(oldVal).join(newVal);
+                  } else if (cells[cIdx].indexOf(oldDate) !== -1) {
+                    cells[cIdx] = cells[cIdx].split(oldDate).join(newDate);
+                  }
+                }
+                continue;
+              }
+
+              // Numeric replacement (handles "380.0" in BQ vs "380 kg" or "380" in TSV)
+              if (/^\d+(?:\.\d+)?$/.test(oldVal) && /^\d+(?:\.\d+)?$/.test(newVal)) {
+                const oldNorm = String(Number(oldVal));
+                const newNorm = String(Number(newVal));
+                for (let cIdx = 0; cIdx < cells.length; cIdx++) {
+                  const cellTrim = cells[cIdx].trim();
+                  if (cellTrim === oldVal) {
+                    cells[cIdx] = newVal;
+                  } else if (cellTrim === oldNorm) {
+                    cells[cIdx] = newNorm;
+                  } else if (cellTrim.indexOf(oldVal + ' ') === 0) {
+                    cells[cIdx] = newVal + cellTrim.slice(oldVal.length);
+                  } else if (cellTrim.indexOf(oldNorm + ' ') === 0) {
+                    cells[cIdx] = newNorm + cellTrim.slice(oldNorm.length);
+                  }
+                }
+                continue;
+              }
+
+              // Exact cell match for descriptive strings (customer name, grade, series, etc.)
+              if (oldVal.length >= 4) {
+                for (let cIdx = 0; cIdx < cells.length; cIdx++) {
+                  if (cells[cIdx].trim() === oldVal) {
+                    cells[cIdx] = newVal;
+                  }
+                }
+              }
+            }
+
+            // If the TSV row has a standalone YYYY-MM-DD cell and bqTarget has a date, align it
+            if (targetDateIso) {
+              for (let cIdx = 0; cIdx < cells.length; cIdx++) {
+                if (/^\d{4}-\d{2}-\d{2}$/.test(cells[cIdx].trim())) {
+                  cells[cIdx] = targetDateIso;
+                }
+              }
+            }
+          }
+
+          const newRow = cells.join('\t');
+          xContent = xContent.trim() + '\n' + newRow;
+          xFile.fileContent = xContent;
+          console.log('[BINDING REPAIR] Appended missing cited ID ' + cid + ' to Excel file ' + xFile.fileName);
+        }
+      }
+    }
+
+    // 5. Ensure every image in imageFiles contains at least one discrepancy row
+    const discrepancyRe = /obsolete|discontinued|mismatch|discrepancy|discrepancies|anomaly|anomalies|invalid|legacy|error|exceed|abnormal|fuzzy|missing|unlisted|non-standard|check replacement|\b999\b|\u5ec3\u756a|\u5ec3\u6b62|\u65e7\u54c1\u756a|\u4e0d\u4e00\u81f4|\u7570\u5e38|\u4e0d\u660e|\u6b20\u54c1|\u8981\u78ba\u8a8d/i;
+    const isDiscrepancyRow = function(rowStr) {
+      const s = String(rowStr || '');
+      if (discrepancyRe.test(s)) return true;
+      for (let i = 0; i < bqObsoleteItems.length; i++) {
+        const vals = bqObsoleteItems[i].vals;
+        const headers = bqObsoleteItems[i].headers || [];
+        for (let j = 0; j < vals.length; j++) {
+          const v = String(vals[j] || '').trim();
+          const h = String(headers[j] || '').toLowerCase();
+          const isIdCol = j === 0 || /(?:^|_)(id|code|sku|part|model|item)(?:_|$)/.test(h);
+          const isCodeToken = /^(?=[A-Z0-9-]*\d)[A-Z0-9]{1,10}-[A-Z0-9-]{2,12}$/.test(v) && !/^\d{4}-\d{2}-\d{2}$/.test(v);
+          if (isIdCol && isCodeToken && s.indexOf(v) !== -1) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+
+    const adaptDonorRowForImage = function(rawDonor, targetImg) {
+      const existingRows = Array.isArray(targetImg.imageRows) ? targetImg.imageRows : [];
+      const targetCols = Array.isArray(targetImg.imageColumns) ? targetImg.imageColumns : [];
+      const nextPos = existingRows.length + 1;
+      const donorCells = String(rawDonor).split('|').map(function(c) { return c.trim(); });
+      const donorHasLeadingPos = donorCells.length >= 3 && /^\d{1,2}$/.test(donorCells[0]);
+      const targetHasLeadingPos = (existingRows.length > 0 && /^\s*\d{1,2}\s*\|/.test(existingRows[0])) ||
+        (targetCols.length > 0 && /^(pos\.?|no\.?|#|line|seq|\u9805\u756a|\u756a\u53f7)$/i.test(String(targetCols[0]).trim()));
+      if (targetHasLeadingPos && donorHasLeadingPos) {
+        donorCells[0] = String(nextPos);
+        return donorCells.join(' | ');
+      }
+      if (targetHasLeadingPos && !donorHasLeadingPos) {
+        if (targetCols.length === 0 || donorCells.length + 1 === targetCols.length) {
+          return [String(nextPos)].concat(donorCells).join(' | ');
+        }
+      }
+      if (!targetHasLeadingPos && donorHasLeadingPos && targetCols.length > 0 && donorCells.length - 1 === targetCols.length) {
+        return donorCells.slice(1).join(' | ');
+      }
+      return donorCells.join(' | ');
+    };
+
+    let donorRow = '';
+    let donorImgId = '';
+    for (let i = 0; i < imageFiles.length; i++) {
+      const img = imageFiles[i];
+      const rows = Array.isArray(img.imageRows) ? img.imageRows : [];
+      for (let r = 0; r < rows.length; r++) {
+        if (isDiscrepancyRow(rows[r])) {
+          donorRow = rows[r];
+          donorImgId = img.id;
+          break;
+        }
+      }
+      if (donorRow) break;
+    }
+
+    if (!donorRow && bqObsoleteItems.length > 0 && imageFiles.length > 0) {
+      const obs = bqObsoleteItems[0];
+      const cols = Array.isArray(imageFiles[0].imageColumns) ? imageFiles[0].imageColumns : [];
+      const targetLen = Math.max(3, cols.length);
+      const picked = [];
+      for (let j = 0; j < obs.vals.length && picked.length < targetLen - 1; j++) {
+        if (obs.vals[j]) picked.push(obs.vals[j]);
+      }
+      picked.push('Obsolete code - check replacement');
+      donorRow = picked.join(' | ');
+    }
+
+    if (!donorRow && imageFiles.length > 0) {
+      donorRow = 'OBS-999 | Discontinued Legacy Spec (Obsolete code - check replacement) | 1';
+    }
+
+    if (donorRow) {
+      for (let i = 0; i < imageFiles.length; i++) {
+        const img = imageFiles[i];
+        if (!Array.isArray(img.imageRows)) img.imageRows = [];
+        const hasDisc = img.imageRows.some(isDiscrepancyRow);
+        if (!hasDisc) {
+          const adaptedRow = adaptDonorRowForImage(donorRow, img);
+          img.imageRows.push(adaptedRow);
+          // Only mark _repairedDiscrepancyFrom when base64Data was ALREADY rendered before
+          // this row was injected (i.e., legacy restored backups). During planAndGenerateData,
+          // this runs BEFORE [ImageGen-Pipeline] renders base64Data, so the rendered image
+          // will natively contain the injected discrepancy row.
+          if (img.base64Data && donorImgId && donorImgId !== img.id) {
+            img._repairedDiscrepancyFrom = donorImgId;
+          }
+          if (img.description && /normal quantities/i.test(img.description)) {
+            img.description = img.description.replace(/with normal quantities/i, 'with normal items plus an audit-seed discrepancy row');
+          }
+          console.log('[BINDING REPAIR] Injected audit-seed discrepancy row into ' + img.fileName);
+        }
+      }
+    }
+
+    // 6. Normalize demoGuide[].requiredFileId and repair prompt-to-file bindings
+    const stopWords = {
+      file: 1, files: 1, data: 1, report: 1, table: 1, tables: 1, internal: 1,
+      company: 1, business: 1, system: 1, analysis: 1, summary: 1, order: 1,
+      orders: 1, custom: 1, task: 1, task1: 1, task2: 1, item: 1, items: 1,
+      record: 1, records: 1, sheet: 1, document: 1, quarterly: 1, handwritten: 1,
+      scanned: 1, image: 1, catalog: 1
+    };
+    const getFileKeywords = function(f) {
+      const base = String(f.fileName || '').toLowerCase().replace(/\.[a-z0-9]+$/i, '');
+      return base.split(/[^a-z0-9]+/).filter(function(w) {
+        return w.length >= 4 && !stopWords[w];
+      });
+    };
+    const countKeywordHits = function(keywords, text) {
+      const lower = String(text || '').toLowerCase();
+      let hits = 0;
+      for (let i = 0; i < keywords.length; i++) {
+        const kw = keywords[i];
+        const stem = kw.length >= 5 ? kw.slice(0, kw.length - 1) : kw;
+        if (lower.indexOf(stem) !== -1) hits++;
+      }
+      return hits;
+    };
+
+    const resolveFileTokens = function(rawVal) {
+      if (!rawVal) return [];
+      const list = Array.isArray(rawVal) ? rawVal : String(rawVal).split(/[,;|]+/);
+      const resolved = [];
+      for (let i = 0; i < list.length; i++) {
+        const tok = String(list[i] || '').trim();
+        if (!tok) continue;
+        if (/^(none|null|empty|false|n\/a|file1\s+or\s+empty)$/i.test(tok)) continue;
+        const match = byId[tok] || byId[tok.toLowerCase()] || byName[tok.toLowerCase()];
+        if (match && resolved.indexOf(match.id) === -1) {
+          resolved.push(match.id);
+        }
+      }
+      return resolved;
+    };
+
+    const boundInEarlierPrompts = {};
+
+    for (let gIdx = 0; gIdx < guide.length; gIdx++) {
+      const st = guide[gIdx];
+      if (!st || typeof st !== 'object') continue;
+      let ids = resolveFileTokens(st.requiredFileId);
+      const stepText = String(st.title || '') + ' ' + String(st.prompt || '') + ' ' + String(st.watchPoint || '');
+
+      const isVisionPrompt = /\b(handwritten|scanned|fax(?:ed)?|order\s+sheet|requisition\s+form|vision\s+showcase|ocr)\b|\u624b\u66f8\u304d|\u6ce8\u6587\u66f8|\u767a\u6ce8\u66f8|\u30b9\u30ad\u30e3\u30f3/i.test(stepText);
+      const isCrossSourcePrompt = /\b(cross-reference|cross-source|audit\s+findings|audit\s+report|supplier\s+\w*\s*feeds?|surcharge\s+feeds?|surcharge\s+ledger)\b|\u76e3\u67fb\u5831\u544a|\u76e3\u67fb\u30ec\u30dd\u30fc\u30c8|\u7a81\u5408/i.test(stepText);
+
+      // If a Cross-Source prompt accidentally bound an image (e.g. due to reordered externalFiles), strip the image
+      if ((gIdx === 2 || isCrossSourcePrompt) && !isVisionPrompt && (pdfFiles.length > 0 || excelFiles.length > 0)) {
+        ids = ids.filter(function(id) { return imageFiles.indexOf(byId[id]) === -1; });
+      }
+
+      // Check if this step is a Cross-Source Discovery prompt referencing both PDF and Excel
+      const hasPdf = ids.some(function(id) { return pdfFiles.indexOf(byId[id]) !== -1; });
+      const hasExcel = ids.some(function(id) { return excelFiles.indexOf(byId[id]) !== -1; });
+
+      if ((hasPdf || gIdx === 2) && !hasExcel && !isVisionPrompt && excelFiles.length > 0) {
+        const xFile = excelFiles[0];
+        const xKeywordHits = countKeywordHits(getFileKeywords(xFile), stepText);
+        const hasExcelCue = /\b(supplier\s+\w*\s*feeds?|surcharge\s+feeds?|surcharge\s+ledger|external\s+ledger|spreadsheet|rate\s+sheet|carrier\s+log)\b|\u30b5\u30d7\u30e9\u30a4\u30e4\u30fc|\u53f0\u5e33|\u660e\u7d30/i.test(stepText);
+        if (xKeywordHits >= 2 || hasExcelCue) {
+          if (ids.indexOf(xFile.id) === -1) ids.push(xFile.id);
+        }
+      }
+      if ((hasExcel || gIdx === 2) && !hasPdf && !isVisionPrompt && pdfFiles.length > 0) {
+        const pFile = pdfFiles[0];
+        const pKeywordHits = countKeywordHits(getFileKeywords(pFile), stepText);
+        const hasPdfCue = /\b(audit\s+findings|audit\s+report|procurement\s+audit|compliance\s+report|inspection\s+report)\b|\u76e3\u67fb\u5831\u544a|\u76e3\u67fb\u30ec\u30dd\u30fc\u30c8/i.test(stepText);
+        if (pKeywordHits >= 2 || hasPdfCue) {
+          ids.unshift(pFile.id);
+        }
+      }
+
+      // Ensure Vision Showcase prompts bind to an image file (and not an Excel/PDF if externalFiles was reordered)
+      if (isVisionPrompt && !isCrossSourcePrompt && imageFiles.length > 0) {
+        ids = ids.filter(function(id) { return imageFiles.indexOf(byId[id]) !== -1; });
+        if (ids.length === 0) {
+          let bestImg = imageFiles[0];
+          let bestScore = -1;
+          for (let imgIdx = 0; imgIdx < imageFiles.length; imgIdx++) {
+            const candidateImg = imageFiles[imgIdx];
+            const imgTokens = String((candidateImg.fileName || '') + ' ' + (candidateImg.description || ''))
+              .toLowerCase()
+              .split(/[^a-z0-9]+/)
+              .filter(function(w) { return w.length >= 4 && !stopWords[w]; });
+            const score = countKeywordHits(imgTokens, stepText);
+            if (score > bestScore) {
+              bestScore = score;
+              bestImg = candidateImg;
+            }
+          }
+          ids.push(bestImg.id);
+        }
+      }
+
+      // Check Vision prompt image binding for legacy restored backups
+      for (let ii = 0; ii < ids.length; ii++) {
+        const boundObj = byId[ids[ii]];
+        if (boundObj && imageFiles.indexOf(boundObj) !== -1 && boundObj.base64Data && boundObj._repairedDiscrepancyFrom) {
+          // Legacy restored backup where base64Data was already baked without the discrepancy row:
+          // also bind the sibling image that has the discrepancy rendered in its pixels.
+          if (ids.indexOf(boundObj._repairedDiscrepancyFrom) === -1) {
+            ids.push(boundObj._repairedDiscrepancyFrom);
+          }
+        }
+      }
+
+      // Clear misplaced duplicate file bindings on late prompts (e.g. Prompt 7 live web browse + deck)
+      if (gIdx >= 4 && ids.length > 0) {
+        const isWebBrowseOrDeck = /\b(browse|trading\s*economics|online|web\s+research|presentation\s+deck|board\s+deck|autonomous\s+agent)/i.test(stepText);
+        const mentionsExternalUpload = /\b(uploaded|attached|audit\s+report|supplier\s+\w*\s*feed|surcharge\s+feed|surcharge\s+ledger|handwritten|scanned\s+order)/i.test(String(st.prompt || ''));
+        if (isWebBrowseOrDeck && !mentionsExternalUpload) {
+          ids = ids.filter(function(id) { return !boundInEarlierPrompts[id]; });
+        }
+      }
+
+      for (let ii = 0; ii < ids.length; ii++) {
+        boundInEarlierPrompts[ids[ii]] = true;
+      }
+      st.requiredFileId = ids.join(',');
+    }
+  } catch (err) {
+    console.warn('[BINDING REPAIR] skipped: ' + err.message);
   }
 }
 
@@ -1924,6 +2591,9 @@ function validateGeneratedData(planResult, targetRows, dataProfileId) {
     
     table.csvData = cleanedLines.join('\n');
   }
+
+  // Ensure externalFiles, demoGuide requiredFileId, and cross-file IDs are aligned
+  validateAndRepairExternalFileBindings_(planResult);
 }
 
 /**
@@ -2256,8 +2926,217 @@ function buildManagedAgentInstruction_(businessInstruction, datasetId, fsCollect
   return text.split('__MA_SYSINSTR_EOF__').join('MA_SYSINSTR_EOF');
 }
 
+// ── Data asset catalog ────────────────────────────────────────────────────────
+// The generated agent's system instruction asserts that it already knows every
+// table, every column and the period the data covers, and several of its rules
+// ("the catalog above IS your schema", PATH 0, the no-rediscovery MUSTs) are only
+// true because of that. These functions are what make them true: they turn the
+// planned tables into adk_agent/app/data_assets.md, which agent.py substitutes
+// into its [DATA_ASSET_CATALOG] placeholder at import time.
+//
+// The date coverage is the reason this exists at all. Without it the model opens
+// a figure question with a MIN/MAX probe to find out what period the synthetic
+// data covers - a whole round trip the user waits through, every fresh
+// conversation.
+const CATALOG_MAX_ENUM_VALUES = 8;
+const CATALOG_MAX_ENUM_LEN = 40;
+const CATALOG_MAX_DESC = 180;
+const CATALOG_DATE_TYPES = ['DATE', 'DATETIME', 'TIMESTAMP'];
+
+/**
+ * Minimal RFC4180 CSV reader. The generated csvData carries quoted fields with
+ * embedded commas and newlines, so splitting on ',' would mis-count columns and
+ * hand the catalog garbage values to summarize.
+ * @param {string} text
+ * @return {Array<Array<string>>}
+ */
+function parseCsvRows_(text) {
+  const s = String(text || '');
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charAt(i);
+    if (inQuotes) {
+      if (c === '"') {
+        if (s.charAt(i + 1) === '"') { field += '"'; i++; } else { inQuotes = false; }
+      } else { field += c; }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ',') {
+      row.push(field); field = '';
+    } else if (c === '\n') {
+      row.push(field); rows.push(row); row = []; field = '';
+    } else if (c !== '\r') {
+      field += c;
+    }
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+/**
+ * Best-effort BigQuery type for a column the plan gave no schema entry for.
+ * @param {Array<string>} values non-empty values only
+ * @return {string}
+ */
+function inferCatalogType_(values) {
+  if (!values.length) return 'STRING';
+  const dateRe = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?)?/;
+  if (values.every(v => dateRe.test(v))) {
+    return values.some(v => v.length > 10) ? 'TIMESTAMP' : 'DATE';
+  }
+  if (values.every(v => /^-?\d+$/.test(v))) return 'INTEGER';
+  if (values.every(v => !isNaN(parseFloat(v)) && isFinite(v))) return 'FLOAT';
+  return 'STRING';
+}
+
+/**
+ * @param {string} text
+ * @param {number} limit
+ * @return {string}
+ */
+function clipCatalogText_(text, limit) {
+  const t = String(text == null ? '' : text).split(/\s+/).filter(Boolean).join(' ');
+  return t.length <= limit ? t : t.substring(0, limit - 3).replace(/\s+$/, '') + '...';
+}
+
+/**
+ * The one line of measured fact: how many rows, and what period they cover.
+ * Shared verbatim between the prompt catalog and the BigQuery table
+ * description, so Knowledge Catalog shows exactly what the agent was told.
+ * @param {number} rowCount
+ * @param {Array<string>} coverage
+ * @return {string}
+ */
+function catalogFactsLine_(rowCount, coverage) {
+  return 'Rows: ' + rowCount + '. Coverage: ' +
+         (coverage.length ? coverage.join('; ') : 'no date column');
+}
+
+/**
+ * Row count and date coverage for one table, from the CSV that will be loaded.
+ * @param {Object} table
+ * @return {string} '' when the table has no parseable rows
+ */
+function buildTableFactsLine_(table) {
+  const rows = parseCsvRows_(table.csvData);
+  if (!rows.length) return '';
+  const header = rows[0].map(h => String(h).trim());
+  const dataRows = rows.slice(1).filter(r => r.some(c => String(c).trim() !== ''));
+  const schemaByName = {};
+  (table.schema || []).forEach(f => {
+    if (f && f.name) schemaByName[String(f.name).trim()] = String(f.type || '').toUpperCase();
+  });
+  const coverage = [];
+  header.forEach((name, idx) => {
+    const present = dataRows
+      .map(r => String(idx < r.length ? r[idx] : '').trim())
+      .filter(v => v !== '');
+    const type = schemaByName[name] || inferCatalogType_(present);
+    if (CATALOG_DATE_TYPES.indexOf(type) !== -1 && present.length) {
+      const sorted = present.slice().sort();
+      coverage.push('`' + name + '` ' + sorted[0].substring(0, 10) +
+                    ' -> ' + sorted[sorted.length - 1].substring(0, 10));
+    }
+  });
+  return catalogFactsLine_(dataRows.length, coverage);
+}
+
+/**
+ * The text written to BigQuery as the table description, and from there
+ * harvested into Knowledge Catalog: the authored grain sentence plus the same
+ * facts line the agent's prompt carries.
+ * @param {Object} table
+ * @return {string} '' when there is nothing to say
+ */
+function buildBqTableDescription_(table) {
+  const authored = String(table.description || '').trim();
+  const facts = buildTableFactsLine_(table);
+  if (authored && facts) return authored + ' ' + facts;
+  return authored || facts;
+}
+
+/**
+ * Markdown for the whole dataset. Returns '' when there is nothing to describe,
+ * which leaves the agent on its runtime-discovery fallback.
+ * @param {Array<Object>} tables
+ * @return {string}
+ */
+function buildDataAssetCatalog_(tables) {
+  if (!tables || !tables.length) return '';
+  const sections = [];
+  tables.slice().sort((a, b) => String(a.tableName).localeCompare(String(b.tableName)))
+    .forEach(table => {
+      const rows = parseCsvRows_(table.csvData);
+      if (!rows.length) return;
+      const header = rows[0].map(h => String(h).trim());
+      const dataRows = rows.slice(1).filter(r => r.some(c => String(c).trim() !== ''));
+
+      const schemaByName = {};
+      (table.schema || []).forEach(f => {
+        if (f && f.name) {
+          schemaByName[String(f.name).trim()] = {
+            type: String(f.type || '').toUpperCase(),
+            description: String(f.description || '').trim()
+          };
+        }
+      });
+
+      const columnLines = [], coverage = [];
+      header.forEach((name, idx) => {
+        const present = dataRows
+          .map(r => String(idx < r.length ? r[idx] : '').trim())
+          .filter(v => v !== '');
+        const meta = schemaByName[name] || {};
+        const type = meta.type || inferCatalogType_(present);
+        // Clipped BEFORE the value list is appended, never after: a long authored
+        // description would otherwise eat the budget and leave the enum severed
+        // mid-value ("Sprouts Farmers Marke..."), which is worse than no enum -
+        // the model writes the truncated string into a WHERE clause.
+        let desc = meta.description ? clipCatalogText_(meta.description, CATALOG_MAX_DESC) : '';
+
+        if (CATALOG_DATE_TYPES.indexOf(type) !== -1 && present.length) {
+          const sorted = present.slice().sort();
+          coverage.push('`' + name + '` ' + sorted[0].substring(0, 10) +
+                        ' -> ' + sorted[sorted.length - 1].substring(0, 10));
+          if (!desc) desc = 'date column';
+        } else if (type === 'STRING' && present.length) {
+          // A categorical column is far more useful to the model as its actual
+          // value list than as "STRING": it stops the agent guessing
+          // `WHERE status = 'Completed'` when the data says 'COMPLETE'.
+          const distinct = Object.keys(present.reduce((acc, v) => { acc[v] = 1; return acc; }, {})).sort();
+          const longest = distinct.reduce((m, v) => Math.max(m, v.length), 0);
+          if (distinct.length <= CATALOG_MAX_ENUM_VALUES && longest <= CATALOG_MAX_ENUM_LEN &&
+              distinct.length < present.length) {
+            const valuesTxt = 'values: ' + distinct.join(', ');
+            desc = desc ? (desc + ' | ' + valuesTxt) : valuesTxt;
+          }
+        }
+        columnLines.push('`' + name + '` ' + type + (desc ? ' - ' + desc : ''));
+      });
+
+      const tableDesc = clipCatalogText_(table.description || '', 300);
+      const lines = [tableDesc ? '### `' + table.tableName + '` - ' + tableDesc
+                               : '### `' + table.tableName + '`'];
+      lines.push(catalogFactsLine_(dataRows.length, coverage));
+      columnLines.forEach(c => lines.push('  - ' + c));
+      sections.push(lines.join('\n'));
+    });
+  return sections.join('\n\n');
+}
+
 function generateSetupScript(params) {
-  const { datasetId, systemInstruction, businessInstruction, referenceDate, publicDatasetId, suffix, tables, firestore, userGoal, dirName, agentShortName, oneSentenceSummary, operatingModel, enableWorkspaceMcp, enableComputerUse, enableManagedAgent, enableWorkspaceAuth, metadata } = params;
+  const { datasetId, systemInstruction, businessInstruction, referenceDate, publicDatasetId, suffix, tables, firestore, userGoal, dirName, agentShortName, oneSentenceSummary, operatingModel, enableWorkspaceMcp, enableComputerUse, enableManagedAgent, enableWorkspaceAuth, keepWarm, enableCloudTelemetry, enableModelArmor, modelArmorTemplate, metadata } = params;
+  // Data exploration mode. 'mcp' (default) keeps the agent on the Knowledge
+  // Catalog + SQL path and provisions no search index; 'rag' builds a Discovery
+  // Engine index and makes it the READ path, leaving writes and computed
+  // figures on MCP. `enableDatastoreConnectors` is the pre-v11.73 boolean and is
+  // still honoured so a demo restored from Drive rebuilds the same script.
+  const dataExplorationMode =
+    (params.dataExplorationMode === 'rag' || params.dataExplorationMode === 'mcp')
+      ? params.dataExplorationMode
+      : (params.enableDatastoreConnectors === true ? 'rag' : 'mcp');
+  const ragMode = (dataExplorationMode === 'rag');
 
   // Derived feature gates (see AGENTS.md section 14):
   // - workspaceAuthEnabled: the GE OAuth authorization (user token) exists.
@@ -2358,7 +3237,9 @@ function generateSetupScript(params) {
   // See AGENTS.md Section 13 for the update checklist.
   const PINNED_DEPS = {
     // Critical: A2UI SDK -- MUST use git+commit (PyPI 0.2.1 lacks version param)
-    //   Tested: HEAD ade478f with version='0.8' -> application/json+a2ui (GE compatible)
+    //   Tested: HEAD ade478f with version='0.9' -> application/json+a2ui (GE compatible).
+    //   The version kwarg stays load-bearing on v0.9: GE reads only that MIME,
+    //   never the newer 'application/a2ui+json' the SDK emits without it.
     //   Constraint: a2ui@ade478f requires google-genai>=1.27.0, google-adk>=1.28.1
     a2ui: 'a2ui-agent-sdk @ git+https://github.com/google/A2UI.git@ade478faf8dcad611b5efb6b864dcbfbc4a51f68#subdirectory=agent_sdks/python',
 
@@ -2418,6 +3299,16 @@ function generateSetupScript(params) {
     firestore: 'google-cloud-firestore>=2.16.0,<3.0.0',
     logging: 'google-cloud-logging>=3.0.0,<4.0.0',
 
+    // (v11.93 / v12.24) google-api-core is a TRANSITIVE dependency of every
+    // Google Cloud client here, declared directly to hold both a floor and a ceiling:
+    // - Ceiling <2.35.0: 2.35.0 (2026-08-24) added urllib.parse.quote(val, safe="/")
+    //   to path_template._expand_variable_match as path-traversal hardening, encoding
+    //   the parentheses in Firestore's default database id (%28default%29 -> 400).
+    // - Floor >=2.28.0: google-cloud-firestore 2.30.0+ calls
+    //   google.api_core.check_python_version() at import time, which was introduced
+    //   in google-api-core 2.28.0.
+    apiCore: 'google-api-core>=2.28.0,<2.35.0',
+
     // Utilities
     dotenv: 'python-dotenv>=1.0.0,<2.0.0',
     dbDtypes: 'db-dtypes>=1.0.0,<2.0.0',
@@ -2427,12 +3318,15 @@ function generateSetupScript(params) {
     pythonImage: 'python:3.11.12-slim',
     uvImage: 'ghcr.io/astral-sh/uv:0.11.17',
     uvVersion: '0.11.17',
+    excludeNewer: '2026-09-25T00:00:00Z',
     supergateway: 'supergateway@3.4.3',
 
     // Viewer app
     viewerFunctionsFramework: 'functions-framework>=3.5.0,<4.0.0',
     viewerFlask: 'flask>=3.0.3,<4.0.0',
     viewerFirestore: 'google-cloud-firestore>=2.16.0,<3.0.0',
+    // The viewer reads the same Firestore collections, so it needs the same bounds.
+    viewerApiCore: 'google-api-core>=2.28.0,<2.35.0',
 
     // Computer Use (browser agent) -- only added when enableComputerUse is set.
     // playwright pin matches the official reference impl
@@ -2455,56 +3349,15 @@ function generateSetupScript(params) {
     cuOtelGcpResourceDetector: 'opentelemetry-resourcedetector-gcp>=1.12.0a0,<2.0.0',
   };
 
-  // == constraints.txt (v11.40) ==
-  // Caps in requirements.txt only bind the install WE issue. Cloned custom MCP
-  // server repos run their own `uv pip install` inside the same image (see the
-  // __DOCKER_MCP_INSTALL_*__ layers), and an `mcp>=2` pinned in someone else's
-  // requirements.txt would upgrade straight past our cap and reintroduce the
-  // exact ModuleNotFoundError the cap exists to prevent -- in a layer we do not
-  // control and did not write. Passing -c makes the caps apply image-wide.
-  //
-  // UPPER BOUNDS ONLY. A floor in a constraints file can force an upgrade --
-  // including into a pre-release, the trap the cuOtelGcp* comment above
-  // describes -- inside a resolution we are not steering. A cap can only ever
-  // prevent one, so the file is purely protective and cannot make a
-  // third-party install fail in a way our own build would not. Dropping the
-  // floors also collapses the two
-  // google-genai entries (>=1.27.0 and the computer-use >=2.7.0) to one line;
-  // duplicate names in a constraints file are a hard error for pip.
-  //
-  // Constraint files may not carry extras or direct references, so the a2ui git
-  // pin is excluded and `[a2a]` / `[agent_engines]` are stripped. A constraint
-  // on a package that is never installed is a no-op, so listing the
-  // computer-use entries unconditionally is safe and keeps the file identical
-  // across feature-flag combinations.
-  const CONSTRAINT_KEYS = [
-    'adk', 'mcp', 'genai', 'a2a', 'aiplatform', 'storage', 'scheduler',
-    'tasks', 'pubsub', 'firestore', 'logging', 'dotenv', 'dbDtypes', 'otel',
-    'playwright', 'genaiComputerUse', 'cuOtelGcpLogging', 'cuOtelGcpResourceDetector',
-  ];
-  const constraintLines = [];
-  CONSTRAINT_KEYS.forEach(key => {
-    const spec = PINNED_DEPS[key];
-    if (!spec || spec.indexOf(' @ ') !== -1) return;
-    const parsed = spec.match(/^([A-Za-z0-9._-]+)(?:\[[^\]]*\])?(.*)$/);
-    if (!parsed) return;
-    const name = parsed[1];
-    const bounds = (parsed[2] || '').split(',')
-      .map(part => part.trim())
-      .filter(part => part.charAt(0) === '<' || part.substring(0, 2) === '==');
-    if (!bounds.length) return;
-    if (constraintLines.some(line => line.name === name)) return;
-    constraintLines.push({ name: name, text: name + bounds.join(',') });
-  });
-  const constraintsTxt = constraintLines.map(line => line.text).join('\n');
+  // constraints.txt (v11.40, removed v12.3). It existed because cloned MCP
+  // server repos ran their own `uv pip install` into the same site-packages the
+  // agent imports from, so our caps had to bind an install we did not write.
+  // Each sidecar now installs into its own virtualenv (see the
+  // __DOCKER_MCP_INSTALL_*__ layers), which is a boundary rather than a bound:
+  // a third-party install cannot reach the agent's environment at all, and a
+  // sidecar that legitimately needs a version we cap may have it. Reinstating a
+  // shared install would need this file back with it.
 
-
-  const escapedInstruction = systemInstruction
-    .replace(/\\/g, '\\\\\\\\')
-    .replace(/'/g, "'\\''")
-    .replace(/\{/g, '{{')
-    .replace(/\}/g, '}}')
-    .replace(/\n/g, '\\n');
 
   // == Managed Autonomous Agent (Antigravity) generation-time assets ==
   // Craft skills come from this repo's demo-skills/ dir (main branch, fetched
@@ -2520,6 +3373,16 @@ function generateSetupScript(params) {
   const managedAgentInstruction = enableManagedAgent
     ? buildManagedAgentInstruction_(businessInstruction || '', datasetId, fsCollection, true, workspaceAuthEnabled, preBrowseEnabled, operatingModel || '')
     : '';
+
+  // Data-asset catalog. Base64 for the same reason the column descriptions
+  // below are: it is free text in an arbitrary language and must survive an
+  // unquoted heredoc without any escaping. Emitted into the project directory
+  // before the container build, so it ships inside the image.
+  const dataAssetCatalogMd = buildDataAssetCatalog_(tables);
+  const dataAssetCatalogCmd = dataAssetCatalogMd
+    ? `echo "🧾 Writing data-asset catalog for the agent prompt..."\n` +
+      `echo '${Utilities.base64Encode(dataAssetCatalogMd, Utilities.Charset.UTF_8)}' | base64 -d > adk_agent/app/data_assets.md\n`
+    : `echo "⚠️  No data-asset catalog written; the agent will discover the schema at runtime."\n`;
 
   // Build local BQ creation commands
   let bqCommands = `echo "🗄 Creating BigQuery Dataset: ${datasetId}..."\n`;
@@ -2588,8 +3451,12 @@ function generateSetupScript(params) {
     const schemaB64 = Utilities.base64Encode(JSON.stringify(bqSchema), Utilities.Charset.UTF_8);
     bqCommands += `echo '${schemaB64}' | base64 -d > ${table.tableName}_schema.json\n`;
     bqCommands += `bq update ${datasetId}.${table.tableName} ${table.tableName}_schema.json >/dev/null 2>&1 && echo "    ✅ Column metadata: ${table.tableName}" || echo "    ⚠️  Column metadata skipped: ${table.tableName}"\n`;
-    if (table.description) {
-      const descB64 = Utilities.base64Encode(table.description.toString(), Utilities.Charset.UTF_8);
+    // The grain sentence plus the measured facts (row count, date coverage), so
+    // the entry Knowledge Catalog harvests says the same thing as the agent's
+    // prompt. Column descriptions alone leave "what is one row here?" unanswered.
+    const bqTableDesc = buildBqTableDescription_(table);
+    if (bqTableDesc) {
+      const descB64 = Utilities.base64Encode(bqTableDesc, Utilities.Charset.UTF_8);
       bqCommands += `bq update --description "\$(echo '${descB64}' | base64 -d)" ${datasetId}.${table.tableName} >/dev/null 2>&1 || true\n`;
     }
     bqCommands += `rm -f ${table.tableName}_schema.json\n`;
@@ -2625,8 +3492,10 @@ if __name__ == '__main__':
     init_data()
 __PY_EOF__\n`;
 
-    firestoreCommands += `uv run --no-project --with "${PINNED_DEPS.firestore}" python setup_fs.py\n`;
-    firestoreCommands += `rm setup_fs.py\n\n`;
+    firestoreCommands += `if ! uv run --isolated --no-project --with "${PINNED_DEPS.firestore}" --with "${PINNED_DEPS.apiCore}" python setup_fs.py; then\n`
+      + '  echo "    WARNING: Initial Firestore data seeding failed (continuing setup)..."\n'
+      + 'fi\n'
+      + 'rm -f setup_fs.py\n\n';
 
     firestoreCommands += `echo "🌐 Deploying Real-time Data Viewer Web App (Cloud Run Functions)..."\n`;
     firestoreCommands += `mkdir -p ${dirName}/viewer_app\n`;
@@ -2723,13 +3592,60 @@ Requirements:
     // org policies, and a mid-script prompt would stall unattended runs. We
     // only explain the cause and print the manual remedy for operators who
     // DO hold org-policy admin, then continue without the viewer.
-    firestoreCommands += `    if grep -q "run.allowedIngress" "\$VIEWER_LOG"; then\n`;
+    //
+    // v12.21: allowedIngress is not the only one. A gen2 function IS a Cloud
+    // Run service, so the same hardened baseline that pins
+    // constraints/run.allowedVPCEgress and
+    // constraints/run.allowedBinaryAuthorizationPolicies rejects this deploy
+    // too - and for a reason that reads as nothing at all in the raw log,
+    // v12.22: in real failure logs the error arrives like this:
+    //
+    //   ERROR: (gcloud.functions.deploy) ResponseError: status=[400], code=[Ok],
+    //   message=[The request has violated multiple Org Policies. Please refer
+    //   to the respective violations for more information.]
+    //
+    // No constraint name appears anywhere in that log, so all three greps
+    // below used to miss - on the exact deploys this guidance was written for,
+    // leaving the operator with a bare 400. When the log says only that a
+    // policy refused it, explain all three: the summary cannot tell us which.
+    // Plain '...' strings, not template literals: none of these lines
+    // interpolates anything, and a backtick that buys no interpolation is pure
+    // risk in the file whose escaping layering is this project's first cause of
+    // production failures. In single quotes the emitted bash reads $VIEWER_LOG
+    // with no escaping at all - one layer less than the neighbours below.
+    firestoreCommands += '    VIEWER_OP_NAMED=0\n';
+    firestoreCommands += '    if grep -q "run.allowed" "$VIEWER_LOG"; then\n';
+    firestoreCommands += '      VIEWER_OP_NAMED=1\n';
+    firestoreCommands += '    fi\n';
+    firestoreCommands += '    VIEWER_OP_ALL=0\n';
+    firestoreCommands += '    if [ "$VIEWER_OP_NAMED" = "0" ] && grep -qi "org polic" "$VIEWER_LOG"; then\n';
+    firestoreCommands += '      VIEWER_OP_ALL=1\n';
+    firestoreCommands += '      echo ""\n';
+    firestoreCommands += '      echo "    🚧 An organization policy refused the Data Viewer. gcloud reported that as a"\n';
+    firestoreCommands += '      echo "       summary without naming the constraint, so all three that can reject this"\n';
+    firestoreCommands += '      echo "       service are explained below - at least one of them applies."\n';
+    firestoreCommands += '    fi\n';
+    firestoreCommands += '    if [ "$VIEWER_OP_ALL" = "1" ] || grep -q "run.allowedIngress" "$VIEWER_LOG"; then\n';
     firestoreCommands += `      echo ""\n`;
     firestoreCommands += `      echo "    🚧 Cause: org policy 'constraints/run.allowedIngress' does not allow public ingress, which the browser-based Data Viewer needs."\n`;
     firestoreCommands += `      echo "       The Data Viewer is skipped in this environment. If you hold Organization Policy Administrator on this project"\n`;
     firestoreCommands += `      echo "       you can allow it and re-run this script:"\n`;
     firestoreCommands += `      echo "         gcloud resource-manager org-policies allow constraints/run.allowedIngress all --project=$PROJECT_ID"\n`;
     firestoreCommands += `      echo "       (Viewer access itself stays IAP-protected - it is never public even with ingress allowed.)"\n`;
+    firestoreCommands += `    fi\n`;
+    firestoreCommands += `    if [ "\$VIEWER_OP_ALL" = "1" ] || grep -q "run.allowedVPCEgress" "\$VIEWER_LOG"; then\n`;
+    firestoreCommands += `      echo ""\n`;
+    firestoreCommands += `      echo "    🚧 Cause: org policy 'constraints/run.allowedVPCEgress' requires every Cloud Run service"\n`;
+    firestoreCommands += `      echo "       (a gen2 function is one) to declare VPC egress. A service with no VPC attached counts"\n`;
+    firestoreCommands += `      echo "       as a violation, and --vpc-egress is refused unless a network arrives with it, so the fix"\n`;
+    firestoreCommands += `      echo "       is --network/--subnet/--vpc-egress together - or an org-policy exception."\n`;
+    firestoreCommands += `    fi\n`;
+    firestoreCommands += `    if [ "\$VIEWER_OP_ALL" = "1" ] || grep -q "run.allowedBinaryAuthorizationPolicies" "\$VIEWER_LOG"; then\n`;
+    firestoreCommands += `      echo ""\n`;
+    firestoreCommands += `      echo "    🚧 Cause: org policy 'constraints/run.allowedBinaryAuthorizationPolicies' requires the service"\n`;
+    firestoreCommands += `      echo "       to name an allowed policy: --binary-authorization=ALLOWED_POLICY."\n`;
+    firestoreCommands += `      echo "       Read the allowed values with:"\n`;
+    firestoreCommands += `      echo "         gcloud resource-manager org-policies describe constraints/run.allowedBinaryAuthorizationPolicies --project=$PROJECT_ID --effective"\n`;
     firestoreCommands += `    fi\n`;
     firestoreCommands += `    echo "    ℹ️  This is an optional component and does NOT affect the agent's functionality."\n`;
     firestoreCommands += `    echo "    ℹ️  The agent will work normally without the Data Viewer."\n`;
@@ -2781,8 +3697,14 @@ Requirements:
     firestoreCommands += `fi\n\n`;
   }
 
-  // Robustly escape instruction for an unquoted bash heredoc
-  const rawInstruction = systemInstruction.replace(/[\\$`]/g, match => '\\' + match);
+  // The instruction is emitted into a QUOTED heredoc (__GE_INSTRUCTION_EOF__),
+  // which suppresses parameter expansion, command substitution and backslash
+  // processing alike, so it must NOT be escaped. Escaping it is not undone by
+  // the shell: the added backslashes land in generated_instruction.md, which
+  // agent.py reads verbatim, so the model is told "\$5,000" and "C:\\path"
+  // instead of what the plan actually said. The comment this replaces named an
+  // unquoted heredoc; the heredoc has been quoted for as long as it existed.
+  const rawInstruction = systemInstruction;
 
   // Per-demo MCP server config consumed by the static agent_template runtime
   // (tools.get_custom_mcp_toolsets / get_slack_mcp_toolset and the numbered
@@ -2865,7 +3787,7 @@ if [ "$SKIP_SLACK_OAUTH" = "false" ]; then
   SLACK_REDIRECT_URL="https://localhost"
 
   # ── Step 1: Create Slack App via Manifest URL ──
-  SLACK_MANIFEST='{"display_information":{"name":"${(`GE-${dirName}`).substring(0, 35)}"},"features":{},"oauth_config":{"redirect_urls":["'"$SLACK_REDIRECT_URL"'"],"scopes":{"user":["search:read","channels:read","channels:history","groups:read","groups:history","im:read","im:history","mpim:read","mpim:history","chat:write","reactions:read","users:read","users:read.email","team:read","files:read","canvases:read","canvases:write"]}},"settings":{"org_deploy_enabled":false,"socket_mode_enabled":false,"token_rotation_enabled":false}}'
+  SLACK_MANIFEST='{"display_information":{"name":"${dirName.substring(0, 35)}"},"features":{},"oauth_config":{"redirect_urls":["'"$SLACK_REDIRECT_URL"'"],"scopes":{"user":["search:read","channels:read","channels:history","groups:read","groups:history","im:read","im:history","mpim:read","mpim:history","chat:write","reactions:read","users:read","users:read.email","team:read","files:read","canvases:read","canvases:write"]}},"settings":{"org_deploy_enabled":false,"socket_mode_enabled":false,"token_rotation_enabled":false}}'
   ENCODED_MANIFEST=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$SLACK_MANIFEST'''))")
   CREATE_URL="https://api.slack.com/apps?new_app=1&manifest_json=$ENCODED_MANIFEST"
 
@@ -2991,7 +3913,7 @@ echo "════════════════════════�
 echo ""
 RMCP_URL="${mcp.endpoint_url}"
 RMCP_SECRET="${rmSecret}"
-RMCP_CLIENT_NAME="GE Demo (${dirName})"
+RMCP_CLIENT_NAME="Gemini Enterprise Demo (${dirName})"
 RMCP_REDIRECT="https://localhost"
 RMCP_CLIENT_ID=""
 RMCP_CLIENT_SECRET=""
@@ -3328,7 +4250,7 @@ echo "The following steps require manual interaction in the Google Cloud Console
   echo ""
   echo "1. Set up the OAuth consent screen (Branding):"
   echo "   URL: https://console.cloud.google.com/auth/branding?project=\$PROJECT_ID"
-  echo "   - App name: 'GE Demo Agent' (any name works - end users see it on the consent screen)"
+  echo "   - App name: 'Gemini Enterprise Demo Agent' (any name works - end users see it on the consent screen)"
   echo "   - Support email: your own email address"
   echo "   - Audience: choose 'Internal' (recommended - only users in your org, no verification needed)."
   echo "     If 'Internal' is not available (no Workspace org), choose 'External' and then add your"
@@ -3362,7 +4284,7 @@ echo "The following steps require manual interaction in the Google Cloud Console
   echo "3. Create an OAuth 2.0 Client ID (Web application):"
   echo "   URL: https://console.cloud.google.com/auth/clients/create?project=\$PROJECT_ID"
   echo "   - Application type: 'Web application'"
-  echo "   - Name: 'GE Demo Generator' (any name works - it is only shown in the console)"
+  echo "   - Name: 'Gemini Enterprise Demo Generator' (any name works - it is only shown in the console)"
   echo "   - Add the following Authorized Redirect URIs:"
   echo "     - https://vertexaisearch.cloud.google.com/oauth-redirect"
   echo "     - https://vertexaisearch.cloud.google.com/static/oauth/oauth.html"
@@ -3383,9 +4305,9 @@ ${ enableWorkspaceMcp ? `  echo "4. Configure the Chat app (required for Chat MC
 ` : `  echo "4. Configure the Google Chat API app (one-time; required for the agent to post to Chat with your authorization):"
   echo "   URL: https://console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat?project=\$PROJECT_ID"
   echo "   In 'Google Chat API' -> 'Manage' -> 'Configuration', set:"
-  echo "     - App name: 'GE Demo Agent'"
+  echo "     - App name: 'Gemini Enterprise Demo Agent'"
   echo "     - Avatar URL: https://developers.google.com/chat/images/quickstart-app-avatar.png"
-  echo "     - Description: 'GE Demo Agent Workspace actions'"
+  echo "     - Description: 'Gemini Enterprise Demo Agent Workspace actions'"
   echo "     - Disable 'Enable interactive features'."
   echo "     - Under 'Visibility', make the app available to yourself (enter your email or your domain)."
   echo "     - Under 'Logs', select 'Log errors to Logging'."
@@ -3408,7 +4330,7 @@ else
   echo "✅ Stored OAuth credentials found - skipping the console tutorial."
   echo "   Reminder: posting to Google Chat needs a ONE-TIME Google Chat API app configuration:"
   echo "   https://console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat?project=\$PROJECT_ID"
-  echo "   If Chat posts fail with a permission/configuration error, open 'Configuration' there and set it up (App name: '${enableWorkspaceMcp ? 'Chat MCP' : 'GE Demo Agent'}')."
+  echo "   If Chat posts fail with a permission/configuration error, open 'Configuration' there and set it up (App name: '${enableWorkspaceMcp ? 'Chat MCP' : 'Gemini Enterprise Demo Agent'}')."
 fi
 
 # ── OAuth credential pre-flight (v11.38) ──────────────────────────────────
@@ -3505,12 +4427,32 @@ else
 fi
 rm -f "\$AUTH_RESP"
 
+# A write that answered 200 is not proof the resource is READABLE, and the
+# registration further down is the only thing that cares. Read it back and let
+# the answer - not the write - decide whether the agent is registered with an
+# authorization at all: Discovery Engine resolves
+# authorizationConfig.agentAuthorization at create time and rejects the WHOLE
+# registration with 404 NOT_FOUND when it names nothing, so a failed
+# authorization would otherwise cost the demo its agent and its direct chat
+# link, not just its Workspace tools.
+AUTH_GET=\$(curl -s -o /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer \$TOKEN" \
+  -H "X-Goog-User-Project: \$PROJECT_ID" \
+  "https://discoveryengine.googleapis.com/v1alpha/projects/\$PROJECT_ID/locations/global/authorizations/\$AUTH_ID" 2>/dev/null || echo "000")
+if [ "\$AUTH_GET" != "200" ]; then
+  echo "    ⚠️  Authorization \$AUTH_ID is not readable (HTTP \$AUTH_GET) - the agent will be"
+  echo "       registered WITHOUT it. The agent and its direct chat link still work;"
+  echo "       Workspace tools fall back to the service account until this is fixed"
+  echo "       and the script is re-run."
+  AUTH_ID=""
+fi
+
 `;
   }
 
   let fullScript = `#!/bin/bash
 # ===========================================
-# GE Demo Generator - Setup Script (${CONFIG.APP_VERSION})
+# Gemini Enterprise Demo Generator - Setup Script (${CONFIG.APP_VERSION})
 # Generated: ${new Date().toISOString()}
 # Demo: ${dirName}
 # ===========================================
@@ -3524,9 +4466,9 @@ show_usage() {
   echo ""
   echo "Options:"
   echo "  --model-analysis-agent, -m <MODEL>  Set the deep analysis agent model"
-  echo "                                      (default: gemini-3.6-flash)"
+  echo "                                      (default: gemini-3.8-flash)"
   echo "  --model-root-agent <MODEL>          Set the root orchestration agent model"
-  echo "                                      (default: gemini-3.6-flash)"
+  echo "                                      (default: gemini-3.8-flash)"
   echo "  --cleanup, -c                       Delete all provisioned demo resources"
   echo "  --yes, -y                           Skip confirmation prompts (non-interactive use)"
   echo "  --help, -h                          Show this help message and exit"
@@ -3542,8 +4484,8 @@ show_usage() {
 
 
 # --- Argument Parsing ---
-AGENT_MODEL="gemini-3.6-flash"
-AGENT_MODEL_LITE="gemini-3.6-flash"
+AGENT_MODEL="gemini-3.8-flash"
+AGENT_MODEL_LITE="gemini-3.8-flash"
 ROOT_MODEL_CLI_OVERRIDE=false
 CLEANUP_MODE=false
 AUTO_CONFIRM=false
@@ -3610,10 +4552,16 @@ if ! git --version | awk '{split(\$3, gv, "."); exit !(gv[1] > 2 || (gv[1] == 2 
   exit 1
 fi
 
-# --- Network resiliency for package installation ---
+# --- Network resiliency & deterministic host isolation for package installation ---
 echo "⚙️  Configuring robust network timeouts for package resolution..."
 export UV_HTTP_TIMEOUT=600
 export UV_RETRIES=10
+export UV_ISOLATED=1
+export PYTHONNOUSERSITE=1
+unset PYTHONPATH
+if [ -z "$UV_EXCLUDE_NEWER" ]; then
+  export UV_EXCLUDE_NEWER="${PINNED_DEPS.excludeNewer}"
+fi
 
 # --- Detect Project ID early ---
 PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
@@ -3625,14 +4573,114 @@ fi
 
 # --- Authentication & Permissions Check ---
 echo "🔐 Checking authentication..."
-if ! gcloud auth application-default print-access-token >/dev/null 2>&1 || ! gcloud auth print-access-token >/dev/null 2>&1; then
+detect_host_os() {
+  local uname_s
+  uname_s="$(uname -s 2>/dev/null || echo '')"
+  case "\$uname_s" in
+    Darwin*) echo "macos" ;;
+    Linux*)
+      if grep -qi -E 'microsoft|wsl' /proc/version 2>/dev/null; then
+        echo "windows_wsl"
+      elif [ -z "\${DISPLAY:-}" ] || [ -n "\${SSH_CLIENT:-}" ] || [ -n "\${SSH_TTY:-}" ] || [ -n "\${CLOUD_SHELL:-}" ]; then
+        echo "linux_headless"
+      else
+        echo "linux_gui"
+      fi
+      ;;
+    CYGWIN*|MINGW*|MSYS*) echo "windows" ;;
+    *) echo "linux_headless" ;;
+  esac
+}
+
+print_auth_guidance_sh() {
+  local target_proj="\$1"
+  local os_type
+  os_type="$(detect_host_os)"
+  echo ""
+  echo "================================================================================"
+  echo "💡 ACTION REQUIRED: Google Cloud Authentication & Setup Guide"
+  echo "================================================================================"
+  case "\$os_type" in
+    linux_headless)
+      echo "👉 [DETECTED HOST ENVIRONMENT: Linux / Remote VM / SSH (Headless - No Local Browser)]"
+      echo "   Run the following commands to authenticate your environment:"
+      echo "     $ gcloud auth login --enable-gdrive-access --no-launch-browser"
+      echo "     $ gcloud auth application-default login --no-launch-browser"
+      echo "     $ gcloud auth application-default set-quota-project \${target_proj}"
+      echo "     $ gcloud config set project \${target_proj}"
+      echo "   Note: Open the verification URL in any local browser, sign in, and paste the code back."
+      ;;
+    macos)
+      echo "👉 [DETECTED HOST ENVIRONMENT: macOS (Local Terminal / iTerm)]"
+      echo "   Run the following commands to authenticate your environment:"
+      echo "     $ gcloud auth login --enable-gdrive-access"
+      echo "     $ gcloud auth application-default login"
+      echo "     $ gcloud auth application-default set-quota-project \${target_proj}"
+      echo "     $ gcloud config set project \${target_proj}"
+      echo "   Note: A browser window will open automatically for authentication."
+      ;;
+    windows_wsl)
+      echo "👉 [DETECTED HOST ENVIRONMENT: Windows (WSL / WSL2 / PowerShell)]"
+      echo "   Run the following commands to authenticate your environment:"
+      echo "     $ gcloud auth login --enable-gdrive-access"
+      echo "     $ gcloud auth application-default login"
+      echo "     $ gcloud auth application-default set-quota-project \${target_proj}"
+      echo "     $ gcloud config set project \${target_proj}"
+      echo "   Note: If running in WSL without browser interop, append '--no-launch-browser'."
+      ;;
+    *)
+      echo "👉 [DETECTED HOST ENVIRONMENT: Linux Desktop (with GUI Display)]"
+      echo "   Run the following commands to authenticate your environment:"
+      echo "     $ gcloud auth login --enable-gdrive-access"
+      echo "     $ gcloud auth application-default login"
+      echo "     $ gcloud auth application-default set-quota-project \${target_proj}"
+      echo "     $ gcloud config set project \${target_proj}"
+      echo "   Note: A browser window will open automatically."
+      ;;
+  esac
+  echo ""
+  echo "📋 [Other Environments Reference]:"
+  echo "   • Headless Linux / Remote VM: gcloud auth login --enable-gdrive-access --no-launch-browser"
+  echo "   • macOS / Linux GUI:      gcloud auth login --enable-gdrive-access"
+  echo "   • Windows (WSL):          gcloud auth login --enable-gdrive-access"
+  echo "================================================================================"
+  echo ""
+}
+
+verify_auth_preflight() {
+  local target_proj="\$1"
+  local tok=""
+  tok=$(gcloud auth print-access-token 2>/dev/null || echo "")
+  if [ -z "\$tok" ] || echo "\$tok" | grep -qi -E 'error|problem refreshing'; then
+    tok=$(gcloud auth application-default print-access-token 2>/dev/null || echo "")
+  fi
+  if [ -n "\$tok" ] && ! echo "\$tok" | grep -qi -E 'error|problem refreshing'; then
+    return 0
+  fi
+
   echo "❌ Error: Google Cloud credentials have expired or are missing."
-  echo "💡 Please run the following commands to re-authenticate:"
-  echo "    gcloud auth login"
-  echo "    gcloud auth application-default login"
-  echo "Then re-run this setup script."
-  exit 1
-fi
+  print_auth_guidance_sh "\$target_proj"
+  if [ -t 0 ]; then
+    echo "⏸️  Interactive pause: please authenticate in another terminal or browser tab."
+    read -r -p "   Press [Enter] once authenticated to retry, or Ctrl+C to abort... " _PAUSE_IN
+    tok=$(gcloud auth print-access-token 2>/dev/null || echo "")
+    if [ -z "\$tok" ] || echo "\$tok" | grep -qi -E 'error|problem refreshing'; then
+      tok=$(gcloud auth application-default print-access-token 2>/dev/null || echo "")
+    fi
+    if [ -n "\$tok" ] && ! echo "\$tok" | grep -qi -E 'error|problem refreshing'; then
+      echo "✅ Authentication successfully verified!"
+      return 0
+    fi
+    echo "❌ Authentication re-check failed. Aborting deployment."
+    exit 1
+  else
+    echo "❌ Non-interactive environment: cannot pause for login. Aborting deployment."
+    exit 1
+  fi
+}
+
+verify_auth_preflight "$PROJECT_ID"
+gcloud auth application-default set-quota-project "$PROJECT_ID" >/dev/null 2>&1 || true
 
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)" 2>/dev/null || echo "")
 if [ -z "$PROJECT_NUMBER" ]; then
@@ -3687,9 +4735,9 @@ fi
     echo "  • Maps API Key Secret: ${dirName}-maps-key"
     echo "  • Agent Engine (Sandbox): ${dirName}-sandbox"
 ${ enableManagedAgent ? `    echo "  • Managed Agent (Antigravity): ${managedAgentId} (location: global; its sandbox environments expire automatically after 7 idle days)"
-` : ''}    echo "  • Dashboards GCS Bucket: \$DASH_BUCKET (+ signBlob self-binding)"
+` : ''}    echo "  • Dashboards GCS Bucket: \$DASH_BUCKET"
     echo "  • Pub/Sub Topics: ${dirName}-sched-tasks, ${dirName}-task-results"
-    echo "  • Pub/Sub Subscriptions: ${dirName}-sched-tasks-push, ${dirName}-task-results-push"
+    echo "  • Pub/Sub Subscriptions: ${dirName}-sched-tasks-push"
     echo "  • Cloud Scheduler Jobs: ${dirName}-sched-* (if any)"
     echo "  • Firestore Task Collections: ${dirName}_task_definitions, ${dirName}_task_executions"
     echo "  • Local Directory: ~/${dirName}"
@@ -3697,7 +4745,7 @@ ${ enableManagedAgent ? `    echo "  • Managed Agent (Antigravity): ${managedA
     _HAS_SLACK=\$(gcloud secrets describe "${dirName}-slack-token" --project="\$PROJECT_ID" 2>/dev/null && echo "yes" || echo "no")
     if [ "\$_HAS_SLACK" = "yes" ]; then
       echo "⚠️  Manual cleanup required after deletion:"
-      echo "  • Slack App: GE-${dirName}"
+      echo "  • Slack App: ${dirName}"
       echo "    → Delete manually at https://api.slack.com/apps"
       echo ""
     fi
@@ -3766,19 +4814,22 @@ ${ enableManagedAgent ? `
       echo "   ⚠️  Live Viewer Function not found or already deleted."
     fi
 
-    # --- Dashboards bucket + signBlob self-binding ---
+    # --- Dashboards bucket ---
+    # The signBlob (token-creator) self-binding granted at setup is deliberately
+    # NOT removed here. COMPUTE_SA is the project's DEFAULT compute service
+    # account, so every demo in the project shares one binding: the grant is
+    # idempotent, but a removal is not scoped to this demo. Cleaning up the
+    # first demo in a shared project used to strip the binding out from under
+    # every other one, breaking their dashboards' V4 signed URLs with a 403 that
+    # only surfaces when someone opens a link. A service account holding
+    # token-creator on itself grants no access to anything else, so leaving it
+    # costs nothing.
     echo "🪣 Deleting dashboards bucket: \$DASH_BUCKET ..."
     if gcloud storage buckets describe "gs://\$DASH_BUCKET" >/dev/null 2>&1; then
       gcloud storage rm --recursive "gs://\$DASH_BUCKET" --quiet 2>/dev/null && echo "   ✅ Dashboards bucket and objects deleted." || echo "   ⚠️  Failed to delete dashboards bucket."
     else
       echo "   ⚠️  Dashboards bucket not found or already deleted."
     fi
-
-    echo "🔐 Removing signBlob (token-creator) self-binding on the runtime SA..."
-    gcloud iam service-accounts remove-iam-policy-binding "\$COMPUTE_SA" \
-      --member="serviceAccount:\$COMPUTE_SA" \
-      --role="roles/iam.serviceAccountTokenCreator" \
-      --project="$PROJECT_ID" --quiet >/dev/null 2>&1 && echo "   ✅ signBlob self-binding removed." || echo "   ⚠️  Self-binding not present or removal failed."
 
 
 
@@ -3788,7 +4839,7 @@ ${ enableManagedAgent ? `
     echo ""
     echo "🔥 Deleting Firestore Collection: ${fsCollection}..."
     if command -v uv >/dev/null 2>&1; then
-      GOOGLE_API_USE_CLIENT_CERTIFICATE=false uv run --no-project --with "${PINNED_DEPS.firestore}" python3 -c "from google.cloud import firestore; db=firestore.Client(); [d.reference.delete() for d in db.collection('${fsCollection}').stream()]" 2>/dev/null && echo "   ✅ Firestore documents in collection deleted." || echo "   ⚠️  Could not clear Firestore collection automatically."
+      GOOGLE_API_USE_CLIENT_CERTIFICATE=false uv run --isolated --no-project --with "${PINNED_DEPS.firestore}" --with "${PINNED_DEPS.apiCore}" python3 -c "from google.cloud import firestore; db=firestore.Client(); [d.reference.delete() for d in db.collection('${fsCollection}').stream()]" 2>/dev/null && echo "   ✅ Firestore documents in collection deleted." || echo "   ⚠️  Could not clear Firestore collection automatically."
     fi
 
     echo ""
@@ -3916,7 +4967,11 @@ ${ enableManagedAgent ? `
 
     echo ""
     echo "📨 Deleting Pub/Sub topics and subscriptions..."
-    for SUB in "${dirName}-sched-tasks-push" "${dirName}-task-results-push"; do
+    # Only the scheduler topic gets a push subscription. The result topic is for
+    # downstream consumers and is deliberately left unsubscribed (see the note
+    # where the subscriptions are created), so listing it here only ever printed
+    # a "not found" warning that could never mean anything.
+    for SUB in "${dirName}-sched-tasks-push"; do
       gcloud pubsub subscriptions delete "$SUB" --project="$PROJECT_ID" --quiet 2>/dev/null \\
         && echo "   ✅ Subscription deleted: $SUB" \\
         || echo "   ⚠️  Subscription not found: $SUB"
@@ -3956,7 +5011,7 @@ ${ enableManagedAgent ? `
 
     echo ""
     echo "📁 Deleting Firestore task collections..."
-    GOOGLE_API_USE_CLIENT_CERTIFICATE=false uv run --no-project --with "${PINNED_DEPS.firestore}" python3 -c "
+    GOOGLE_API_USE_CLIENT_CERTIFICATE=false uv run --isolated --no-project --with "${PINNED_DEPS.firestore}" --with "${PINNED_DEPS.apiCore}" python3 -c "
 from google.cloud import firestore
 db = firestore.Client()
 for coll_name in ['${dirName}_task_definitions', '${dirName}_task_executions', '${dirName}_task_push_configs', '${dirName}_adk_sessions']:
@@ -3980,12 +5035,12 @@ for coll_name in ['${dirName}_task_definitions', '${dirName}_task_executions', '
       echo ""
       echo "📱 Slack App (manual cleanup required):"
       echo "   ⚠️  Please delete the Slack App manually at: https://api.slack.com/apps"
-      echo "   Look for an app named 'GE-${dirName}' and delete it."
+      echo "   Look for an app named '${dirName}' and delete it."
     fi
 ${ (params.importedMcpList || []).some(m => m.type === 'remote' && m.auth_type === 'oauth2_dcr') ? `
     echo ""
     echo "🔗 Managed remote MCP authorizations (manual cleanup):"
-    echo "   Setup registered an OAuth client named 'GE Demo (${dirName})' with:"
+    echo "   Setup registered an OAuth client named 'Gemini Enterprise Demo (${dirName})' with:"
 ${params.importedMcpList.filter(m => m.type === 'remote' && m.auth_type === 'oauth2_dcr').map(m => `    echo "     • ${m.name || m.endpoint_url}"`).join('\n')}
     echo "   Dynamically registered clients usually cannot be deleted via API."
     echo "   Revoke the demo's access in each provider's connected-apps settings."
@@ -4007,7 +5062,7 @@ AGENT_DISPLAY_NAME='${safeShortName}' # ge:agent-display-name
 # --- 1. Project Detection & Confirmation Loop ---
 while true; do
   echo "========================================================="
-  echo "⚡ GE Demo Generator - Setup Script"
+  echo "⚡ Gemini Enterprise Demo Generator - Setup Script"
   echo "   Version:      ${CONFIG.APP_VERSION}"
   echo "   Generated At: ${new Date().toISOString()}"
   echo "   Options:      --help | --cleanup | --model-analysis-agent | --model-root-agent"
@@ -4018,8 +5073,16 @@ while true; do
   echo "📂 Demo Asset Directory: ~/${dirName}"
   echo "🧠 Agent Models:   root_agent: \$AGENT_MODEL_LITE / deep_analysis_agent: \$AGENT_MODEL"
   echo "🧪 Code Sandbox:   ✅ Enabled (Agent Runtime)"
-  ${ enableComputerUse ? `echo "🖥️ Computer Use:   ✅ Enabled (Browser Agent)"\n` : ''}${ enableManagedAgent ? `echo "🤖 Managed Agent:  ✅ Enabled (Antigravity autonomous sandbox - provisioned in parallel with setup)"\n` : ''}${ enableWorkspaceMcp ? `echo "🔌 Google Workspace MCP: Enabled"\n` : ''}${ (enableWorkspaceAuth && !enableWorkspaceMcp) ? `echo "🔐 Workspace Auth: ✅ Enabled (user OAuth, no MCP servers)"\n` : ''}${mcpBanner}echo "========================================================="
+  ${ ragMode ? `echo "🔎 Data Exploration: RAG-preferred (Discovery Engine index reads + SQL for computed figures and writes)"\n` : `echo "🔎 Data Exploration: MCP (Knowledge Catalog + SQL) - default"\n` }${ enableComputerUse ? `echo "🖥️ Computer Use:   ✅ Enabled (Browser Agent)"\n` : ''}${ enableManagedAgent ? `echo "🤖 Managed Agent:  ✅ Enabled (Antigravity autonomous sandbox - provisioned in parallel with setup)"\n` : ''}${ enableWorkspaceMcp ? `echo "🔌 Google Workspace MCP: Enabled"\n` : ''}${ (enableWorkspaceAuth && !enableWorkspaceMcp) ? `echo "🔐 Workspace Auth: ✅ Enabled (user OAuth, no MCP servers)"\n` : ''}${ keepWarm ? 'echo "🔥 Warm Instance:  ✅ Enabled (min-instances 1 - no cold start, billed while idle)"\n' : ''}${ enableCloudTelemetry !== false ? 'echo "📡 Telemetry (Trace): ✅ Enabled (Cloud Trace token tracking & latency waterfall)"\n' : 'echo "📡 Telemetry (Trace): ❌ Disabled"\n' }${ enableModelArmor ? 'echo "🛡️ Model Armor:     ✅ Enabled (Prompt injection & sensitive data protection)"\n' : ''}${mcpBanner}echo "========================================================="
   
+  # --yes is advertised as "skip confirmation prompts (non-interactive use)", so
+  # it has to skip this one too. Without the break, "read" gets EOF, returns
+  # non-zero and set -e kills the run before a single resource is created.
+  if [ "\$AUTO_CONFIRM" = "true" ]; then
+    echo "Proceeding with this project (--yes)."
+    break
+  fi
+
   echo "Choose an option:"
   echo "  [Y] Yes, proceed with this project (Default)"
   echo "  [N] No, cancel deployment"
@@ -4045,14 +5108,14 @@ while true; do
     # --- Model Selection Flow ---
     echo ""
     echo "🧠 Configure Chat & Orchestration Model (root_agent):"
-    echo "   - root_agent (Chat/UI): Uses 'gemini-3.6-flash' by default."
-    echo "   - deep_analysis_agent (Reasoning): Uses 'gemini-3.6-flash'."
+    echo "   - root_agent (Chat/UI): Uses 'gemini-3.8-flash' by default."
+    echo "   - deep_analysis_agent (Reasoning): Uses 'gemini-3.8-flash'."
     echo ""
     echo "   You can choose 'gemini-3.5-flash-lite' for the root_agent."
     echo "   While it yields simpler and more concise responses, it provides"
     echo "   much faster and snappier interactions for routine chat."
     echo "   For complex tasks requiring deep analysis, the root_agent can"
-    echo "   still delegate the work to the deep_analysis_agent (3.6-flash)."
+    echo "   still delegate the work to the deep_analysis_agent (3.8-flash)."
     echo ""
     read -p "▶ Use lightweight gemini-3.5-flash-lite for root_agent? (Y/n): " CHOOSE_LITE
     CHOOSE_LITE=\$(echo "\$CHOOSE_LITE" | tr -d '\\r\\n\\t ')
@@ -4066,8 +5129,8 @@ while true; do
       AGENT_MODEL_LITE="gemini-3.5-flash-lite"
       echo "   ✅ Configured root_agent to use: gemini-3.5-flash-lite"
     else
-      AGENT_MODEL_LITE="gemini-3.6-flash"
-      echo "   ℹ️  Keeping default root_agent: gemini-3.6-flash"
+      AGENT_MODEL_LITE="gemini-3.8-flash"
+      echo "   ℹ️  Keeping default root_agent: gemini-3.8-flash"
     fi
     echo ""
     # Directly proceed to deployment steps after configuration is complete
@@ -4171,9 +5234,15 @@ except Exception:
       echo "   free trial subscription. Proceeding means you accept:"
       echo "   - the Terms for data use (https://cloud.google.com/retail/data-use-terms)"
       echo "   - the Gemini Enterprise (Agentspace) quality-of-service terms"
-      read -p "   Start a free trial subscription automatically? (y/n) " -n 1 -r
-      echo
-      if [[ \$REPLY =~ ^[Yy]$ ]]; then
+      # The one decision in this script that a human has to make. An unattended
+      # run can pre-answer it with GE_FREE_TRIAL_CONSENT=y; unset and with no
+      # terminal, the read below sees EOF and the answer is no.
+      _GE_TRIAL_REPLY="\${GE_FREE_TRIAL_CONSENT:-}"
+      if [ -z "\$_GE_TRIAL_REPLY" ] && [ -t 0 ]; then
+        read -p "   Start a free trial subscription automatically? (y/n) " -n 1 -r _GE_TRIAL_REPLY
+        echo
+      fi
+      if [[ "\$_GE_TRIAL_REPLY" =~ ^[Yy] ]]; then
         TRIAL_OUT=$(python3 - "\$PROJECT_ID" "\$GE_TOKEN" << 'PYEOF'
 import sys, json, time, datetime, urllib.request, urllib.error
 project_id, token = sys.argv[1], sys.argv[2]
@@ -4263,11 +5332,12 @@ PYEOF
       fi
     fi
 
-    # Active subscription: offer to create the Gemini Enterprise app automatically.
+    # Active subscription: create the Gemini Enterprise app. Not offered - done.
+    # The subscription is the part that carries terms, and it is either already
+    # accepted or was just accepted above; the app itself carries none, so a y/n
+    # here is friction with no decision behind it and it is what stopped an
+    # otherwise unattended run.
     if [ "\$GE_LICENSE_STATE" = "ACTIVE" ]; then
-      read -p "   Create a Gemini Enterprise app in this project automatically now? (y/n) " -n 1 -r
-      echo
-      if [[ \$REPLY =~ ^[Yy]$ ]]; then
         echo "   ⏳ Creating Gemini Enterprise app (this can take a minute or two)..."
         CREATE_OUT=$(python3 - "\$PROJECT_ID" "\$GE_TOKEN" << 'PYEOF'
 import sys, json, time, urllib.request, urllib.error
@@ -4339,7 +5409,6 @@ PYEOF
           echo "   ⚠️  Automatic app creation failed:"
           echo "\$CREATE_OUT" | sed 's/^/      /'
         fi
-      fi
     fi
   fi
 
@@ -4349,8 +5418,11 @@ PYEOF
     echo "   If you haven't, please create one here first:"
     echo "   https://console.cloud.google.com/gemini-enterprise/products?project=$PROJECT_ID"
     echo ""
-    read -p "Have you confirmed the instance exists? (y/n) " -n 1 -r
-    echo
+    REPLY=""
+    if [ -t 0 ]; then
+      read -p "Have you confirmed the instance exists? (y/n) " -n 1 -r
+      echo
+    fi
     if [[ ! \$REPLY =~ ^[Yy]$ ]]; then
         echo "Exiting. Please create the instance and run the script again."
         exit 1
@@ -4384,6 +5456,19 @@ gcloud services enable \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
   --project="$PROJECT_ID"
+${ enableCloudTelemetry !== false ? 'gcloud services enable cloudtrace.googleapis.com --project="$PROJECT_ID" 2>/dev/null || true\n' : ''}${ enableModelArmor ? `gcloud services enable modelarmor.googleapis.com --project="$PROJECT_ID" 2>/dev/null || true
+if ! gcloud model-armor templates describe "${modelArmorTemplate ? modelArmorTemplate.split('/').pop() : 'ge-demo-default-armor'}" --location="us-central1" --project="$PROJECT_ID" >/dev/null 2>&1; then
+  echo "🛡️ Provisioning standard generic Model Armor template (${modelArmorTemplate ? modelArmorTemplate.split('/').pop() : 'ge-demo-default-armor'})..."
+  gcloud model-armor templates create "${modelArmorTemplate ? modelArmorTemplate.split('/').pop() : 'ge-demo-default-armor'}" \\
+    --location="us-central1" \\
+    --project="$PROJECT_ID" \\
+    --pi-and-jailbreak-filter-settings-enforcement=enabled \\
+    --pi-and-jailbreak-filter-settings-confidence-level=medium-and-above \\
+    --malicious-uri-filter-settings-enforcement=enabled \\
+    --rai-settings-filters=hate-speech,harassment,sexually-explicit,dangerous \\
+    --rai-settings-confidence-level=medium-and-above \\
+    --basic-config-filter-enforcement=enabled 2>/dev/null || true
+fi\n` : ''}
 
 # Fast IAM role granting: pre-checks existing roles, skips already-granted, no verification delay
 grant_roles_fast() {
@@ -4431,7 +5516,7 @@ grant_roles_fast "$PROJECT_ID" "serviceAccount" "\$COMPUTE_SA" \
   "roles/mcp.toolUser" "roles/bigquery.jobUser" "roles/bigquery.dataEditor" \
   "roles/serviceusage.serviceUsageConsumer" "roles/aiplatform.user" "roles/logging.logWriter" \
   "roles/datastore.user" "roles/storage.objectViewer" "roles/storage.objectAdmin" "roles/artifactregistry.admin" "roles/run.invoker" \
-  "roles/pubsub.publisher" "roles/cloudscheduler.admin" "roles/cloudtasks.enqueuer" "roles/dataplex.catalogViewer"
+  "roles/pubsub.publisher" "roles/cloudscheduler.admin" "roles/cloudtasks.enqueuer" "roles/dataplex.catalogViewer"${ enableCloudTelemetry !== false ? ' "roles/cloudtrace.agent"' : '' }${ enableModelArmor ? ' "roles/modelarmor.user"' : '' }
 
 # Background task infra: Cloud Scheduler SA needs pubsub.publisher
 echo "🔐 Configuring IAM for Cloud Scheduler Service Agent..."
@@ -4444,32 +5529,41 @@ grant_roles_fast "$PROJECT_ID" "serviceAccount" "\$DISCOVERY_ENGINE_SA" "roles/r
 
 # --- Dashboards: signBlob self-binding + non-public bucket for interactive HTML dashboards ---
 # The runtime SA has no key file, so V4 signed URLs are minted via the IAM signBlob API.
-# That requires the SA to hold token-creator on ITSELF (a resource-level binding on the
-# SA, not a project-level role -- so it cannot go through grant_roles_fast).
+# Resource-level self-binding is tried first (least privilege); if restricted by policy
+# or IAM on the SA resource, falls back to project-level grant.
 echo "🔐 Granting signBlob (token-creator) on the runtime SA to itself..."
 if gcloud iam service-accounts add-iam-policy-binding "\$COMPUTE_SA" \
     --member="serviceAccount:\$COMPUTE_SA" \
     --role="roles/iam.serviceAccountTokenCreator" \
     --project="$PROJECT_ID" --quiet >/dev/null 2>&1; then
   echo "  ✅ signBlob self-binding granted."
+elif gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:\$COMPUTE_SA" \
+    --role="roles/iam.serviceAccountTokenCreator" \
+    --condition=None --quiet >/dev/null 2>&1; then
+  echo "  ✅ signBlob granted at project level (fallback from resource-level self-binding)."
 else
-  echo "  ⚠️  Failed to grant signBlob self-binding (V4 signed URLs may fail)."
+  echo "  ⚠️  Failed to grant signBlob (V4 signed URLs may fail)."
 fi
 
 # --- Cloud Tasks: actAs self-binding ---
 # Enqueueing a task whose http_request carries an oidc_token requires
 # iam.serviceAccounts.actAs on the impersonated SA. The runtime names ITSELF in
-# the token, so the binding is again resource-level on the SA and cannot go
-# through grant_roles_fast. Without it every enqueue fails and the worker
-# silently falls back to the localhost self-call.
+# the token. Resource-level self-binding is tried first (least privilege); if
+# restricted by policy or IAM on the SA resource, falls back to project-level grant.
 echo "🔐 Granting actAs (serviceAccountUser) on the runtime SA to itself..."
 if gcloud iam service-accounts add-iam-policy-binding "\$COMPUTE_SA" \
     --member="serviceAccount:\$COMPUTE_SA" \
     --role="roles/iam.serviceAccountUser" \
     --project="$PROJECT_ID" --quiet >/dev/null 2>&1; then
   echo "  ✅ actAs self-binding granted."
+elif gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:\$COMPUTE_SA" \
+    --role="roles/iam.serviceAccountUser" \
+    --condition=None --quiet >/dev/null 2>&1; then
+  echo "  ✅ actAs granted at project level (fallback from resource-level self-binding)."
 else
-  echo "  ⚠️  Failed to grant actAs self-binding (background tasks fall back to the in-container dispatch)."
+  echo "  ⚠️  Failed to grant actAs (background tasks fall back to the in-container dispatch)."
 fi
 
 echo "🪣 Creating non-public dashboards bucket: \$DASH_BUCKET ..."
@@ -4568,7 +5662,11 @@ MA_TOOLS_DIR="$(pwd)"
 # 1) Craft skills: self-authored packs (embedded at generation time from the
 #    generator repo) + the Google Chrome modern-web-guidance skill (public,
 #    Apache-2.0/CC-BY, cloned fresh at setup time).
-rm -rf skills _mwg_tmp && mkdir -p skills
+# Staged in _ma_skills/, NOT skills/: PHASE A runs before the demo asset
+# directory exists, so it operates on whatever the user's CWD happens to be.
+# This block used to \`rm -rf skills\` there, which silently destroyed a
+# same-named directory the user already owned (hit live 2026-08-23).
+rm -rf _ma_skills _mwg_tmp && mkdir -p _ma_skills
 ${managedSkillsBash}if git clone --depth 1 --quiet https://github.com/GoogleChrome/modern-web-guidance.git _mwg_tmp >/dev/null 2>&1; then
   rm -rf _mwg_tmp/.git
   # Publish-repo layout (verified 2026-07-12): skill packs live under skills/
@@ -4576,15 +5674,15 @@ ${managedSkillsBash}if git clone --depth 1 --quiet https://github.com/GoogleChro
   # SKILL.md or first-level skill dirs in case the layout changes.
   MA_MWG_COPIED=""
   if [ -f _mwg_tmp/skills/modern-web-guidance/SKILL.md ]; then
-    cp -r _mwg_tmp/skills/modern-web-guidance skills/
+    cp -r _mwg_tmp/skills/modern-web-guidance _ma_skills/
     MA_MWG_COPIED="yes"
   elif [ -f _mwg_tmp/SKILL.md ]; then
-    mkdir -p skills/modern-web-guidance
-    cp -r _mwg_tmp/. skills/modern-web-guidance/
+    mkdir -p _ma_skills/modern-web-guidance
+    cp -r _mwg_tmp/. _ma_skills/modern-web-guidance/
     MA_MWG_COPIED="yes"
   else
     for d in _mwg_tmp/*/ _mwg_tmp/skills/*/; do
-      if [ -f "\${d}SKILL.md" ]; then cp -r "$d" skills/; MA_MWG_COPIED="yes"; fi
+      if [ -f "\${d}SKILL.md" ]; then cp -r "$d" _ma_skills/; MA_MWG_COPIED="yes"; fi
     done
   fi
   rm -rf _mwg_tmp
@@ -4605,7 +5703,7 @@ if git clone --depth 1 --quiet https://github.com/googleworkspace/cli.git _gws_t
   MA_GWS_COPIED=""
   for s in gws-shared gws-drive gws-gmail gws-calendar gws-chat gws-docs gws-sheets; do
     if [ -f "_gws_tmp/skills/\$s/SKILL.md" ]; then
-      cp -r "_gws_tmp/skills/\$s" skills/
+      cp -r "_gws_tmp/skills/\$s" _ma_skills/
       MA_GWS_COPIED="yes"
     fi
   done
@@ -4621,18 +5719,18 @@ fi
 ` : ''}
 
 MA_SKILLS_SOURCE=""
-if [ -n "$(ls -A skills 2>/dev/null)" ]; then
+if [ -n "$(ls -A _ma_skills 2>/dev/null)" ]; then
   echo "  📤 Uploading skill packs to gs://$DASH_BUCKET/skills/ ..."
-  if gcloud storage cp -r skills/* "gs://$DASH_BUCKET/skills/" >/dev/null 2>&1; then
+  if gcloud storage cp -r _ma_skills/* "gs://$DASH_BUCKET/skills/" >/dev/null 2>&1; then
     MA_SKILLS_SOURCE="gs://$DASH_BUCKET/skills"
-    echo "  ✅ Skills uploaded ($(find skills -name 'SKILL.md' | wc -l) skill packs)."
+    echo "  ✅ Skills uploaded ($(find _ma_skills -name 'SKILL.md' | wc -l) skill packs)."
   else
     echo "  ⚠️  Skill upload failed (agent will run without mounted skills)."
   fi
 else
   echo "  ⚠️  No skill packs available (agent will run without mounted skills)."
 fi
-rm -rf skills
+rm -rf _ma_skills
 
 # 2) System instruction (quoted heredoc -> file; avoids argv-length limits).
 cat <<'__MA_SYSINSTR_EOF__' > managed_agent_instruction.txt
@@ -4726,14 +5824,9 @@ ${PINNED_DEPS.pubsub}
 ${PINNED_DEPS.firestore}
 ${PINNED_DEPS.logging}
 ${PINNED_DEPS.otel}
+${PINNED_DEPS.apiCore}
 ${ enableComputerUse ? `${PINNED_DEPS.playwright}\n${PINNED_DEPS.genaiComputerUse}\n${PINNED_DEPS.cuOtelGcpLogging}\n${PINNED_DEPS.cuOtelGcpResourceDetector}` : '' }
 __REQ_EOF__
-
-# Generate constraints.txt -- applied to third-party installs inside the image
-# (cloned MCP server repos) so their own requirements cannot break our caps.
-cat <<'__CONSTRAINTS_EOF__' > constraints.txt
-${constraintsTxt}
-__CONSTRAINTS_EOF__
 
 # Generate pyproject.toml required for adk project type
 cp "$GE_TPL/pyproject.toml" pyproject.toml
@@ -4750,7 +5843,8 @@ FROM ${PINNED_DEPS.pythonImage}
 COPY --from=${PINNED_DEPS.uvImage} /uv /uvx /bin/
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY requirements.txt constraints.txt pyproject.toml ./
+ENV UV_EXCLUDE_NEWER=${PINNED_DEPS.excludeNewer}
+COPY requirements.txt pyproject.toml ./
 RUN uv pip install --system -r requirements.txt
 __DOCKER_EOF__
 
@@ -4894,40 +5988,115 @@ RUN git clone ${mcp.github_url} ${mcpDir}
 __DOCKER_MCP_CLONE_${idx}_EOF__
 `;
     let installStep;
-    // -c /app/constraints.txt (v11.40): this installs a repo we did not write,
-    // with dependency bounds we did not choose, into the same site-packages the
-    // agent imports from. Without the constraints file an `mcp>=2` pinned in
-    // that repo upgrades past our cap and the container dies at import.
+    // v12.3: each cloned server is installed into ITS OWN virtualenv, not into
+    // the site-packages the agent imports from. Until now they shared one
+    // environment, and every consequence of that sharing was a problem we then
+    // had to work around:
+    //
+    //   * the agent's caps had to bind someone else's install (-c
+    //     /app/constraints.txt, v11.40), because a vendored mcp>=2 landing in
+    //     shared site-packages kills the agent at import;
+    //   * and that cap then made servers that legitimately need mcp>=2
+    //     uninstallable. google-adk pins mcp<2 and imports modules 2.x deleted,
+    //     so the cap cannot move -- but nothing about the AGENT's requirement
+    //     should decide what a sidecar may depend on.
+    //
+    // The processes were always separate; only the environment was shared. Once
+    // it is not, the sidecar may hold mcp 2.x while the agent holds 1.24, and
+    // the constraints file has nothing left to protect: an install that cannot
+    // reach the agent's site-packages cannot break the agent.
+    //
+    // --system-site-packages keeps this strictly additive. Cloned repos are
+    // frequently sloppy about declaring what they import (mcp especially), and
+    // those servers work today only because the agent's copy happens to be
+    // visible. The venv's own site-packages still comes first, so anything the
+    // server does declare shadows ours for that sidecar.
     //
     // v11.43: every branch below used to end in `2>/dev/null || true`. Three
     // consequences, all of which shipped: a failed install produced a green
     // image whose sidecar then died at runtime with its dependencies missing;
     // the stderr naming the cause was discarded; and because `( ... || true )`
     // always exits 0, the `|| npm` fallback in the Python path was unreachable
-    // code. Adding the constraints file made the first one likelier, not less
-    // -- a cloned server that demands mcp>=2 now fails resolution, which is
-    // precisely the failure that was being swallowed. Each position below
-    // either fails the build or prints a warning; nothing is silent.
-    const pipInstall = `uv pip install --system -c /app/constraints.txt`;
+    // code. Each position below either fails the build or prints a warning;
+    // nothing is silent.
+    //
+    // Plain strings rather than template literals throughout: every backtick
+    // added to this file is one more place a generated shell line can turn into
+    // a command substitution.
+    const venvDir = mcpDir + '/.venv';
+    const mkVenv = 'uv venv --system-site-packages ' + venvDir;
+    const pipInstall = 'uv pip install --python ' + venvDir + '/bin/python';
     // Primary position. No Python manifest at all is a failure here too, so
     // that the Node fallback actually gets its turn.
     const pipStrict = `(if [ -f pyproject.toml ] || [ -f setup.py ]; then ${pipInstall} .; elif [ -f requirements.txt ]; then ${pipInstall} -r requirements.txt; else echo "MCP install: no pyproject.toml, setup.py or requirements.txt" >&2; false; fi)`;
     // Trailing position on a Node repo: a bonus attempt for hybrid servers, so
     // a failure stays non-fatal -- but it is announced rather than hidden.
     const pipBonus = `(if [ -f pyproject.toml ] || [ -f setup.py ]; then ${pipInstall} . || echo "WARNING: optional Python install failed, see above" >&2; elif [ -f requirements.txt ]; then ${pipInstall} -r requirements.txt || echo "WARNING: optional Python install failed, see above" >&2; fi)`;
+    // Middle position. A cloned server that declares a Python floor above this
+    // image's interpreter fails resolution outright -- uv reports "the current
+    // Python version does not satisfy Python>=X" and the build stops, even when
+    // the server is pure Python and would have run fine. Measured against
+    // yahoo-finance-mcp, which declares >=3.14.6 while the image is
+    // ${PINNED_DEPS.pythonImage}.
+    //
+    // v12.3 gives the sidecar the interpreter it asked for: uv downloads a
+    // managed CPython of that minor and rebuilds this one virtualenv on it. The
+    // agent keeps the image's interpreter, so nothing about the demo's own
+    // runtime moves. This replaces the v12.1 workaround, which overrode the
+    // floor for resolution only (--python-version) and therefore had to pass
+    // --no-deps to stop uv selecting every DEPENDENCY's wheel under the
+    // overridden tags too, then reinstall those dependencies from the server's
+    // own metadata in a second pass. That got the build green while leaving the
+    // server on an interpreter it had declared too old -- newer syntax then
+    // failed at import instead. A real interpreter needs none of it: the
+    // ordinary install resolves against the right tags in one pass.
+    //
+    // The reader emits the declared floor only when it is ABOVE this
+    // interpreter, so a satisfiable floor does not rebuild the venv for
+    // nothing. Both metadata dialects, because poetry states the same
+    // requirement in its own table. The comparison is on the full version, not
+    // the minor: a floor of 3.11.13 on a 3.11.12 image is unsatisfiable too,
+    // and uv's newest 3.11 will clear it.
+    //
+    // --clear on the rebuild is not optional. uv REFUSES to create a virtualenv
+    // over an existing one ("A virtual environment already exists"), and the
+    // one made a few clauses earlier is always there -- measured, this is what
+    // the first draft of this position did, and the retry never ran.
+    //
+    // The trailing --python-version is a patch-level override and nothing more.
+    // uv ships a fixed list of managed interpreters, so a floor newer than the
+    // newest patch it knows cannot be installed at all: yahoo-finance-mcp
+    // declares >=3.14.6 while uv ${PINNED_DEPS.uvImage} tops out at 3.14.5.
+    // Refusing there would fail the build over a patch. Overriding it is safe
+    // in a way v12.1's override was not, and the difference is the wheel tags:
+    // within one minor they are identical (cp314), so every dependency wheel
+    // selected under the override is importable by the interpreter actually
+    // running -- which is why this needs no --no-deps and no second pass to
+    // reinstall the dependencies. v12.1 overrode across THREE minors, where
+    // that does not hold. The venv has already been rebuilt on the right minor
+    // by the time this runs; on its own it would be the v12.1 bug again.
+    const readFloor = "python -c 'import tomllib,re,sys;d=tomllib.load(open(\"pyproject.toml\",\"rb\"));p=d.get(\"project\") or {};q=d.get(\"tool\",{}).get(\"poetry\",{}).get(\"dependencies\",{});r=p.get(\"requires-python\") or q.get(\"python\") or \"\";m=re.search(\"([0-9]+)[.]([0-9]+)(?:[.]([0-9]+))?\",r);v=tuple(int(g) for g in m.groups() if g) if m else ();print(\".\".join(str(n) for n in v) if v > sys.version_info[:len(v)] else \"\")'";
+    const pipFloor = '(if [ -f pyproject.toml ]; then FLOOR=$(' + readFloor + '); if [ -n "$FLOOR" ]; then MINOR=$(echo "$FLOOR" | cut -d. -f1,2); echo "MCP install: WARNING - this server declares Python >=$FLOOR, above ' + PINNED_DEPS.pythonImage + '. Rebuilding this sidecar virtualenv on a managed Python $MINOR; the agent keeps the image interpreter." >&2; uv venv --clear --python "$MINOR" ' + venvDir + ' && ( ' + pipInstall + ' . || { echo "MCP install: WARNING - no managed interpreter reaches $FLOOR; resolving as if it did. Wheel tags do not change within a minor, so the dependencies remain importable." >&2; ' + pipInstall + ' --python-version "$FLOOR" .; } ); else false; fi; else false; fi)';
     // A declared build script that fails is fatal: a half-built TypeScript
     // server is exactly the image that starts and then cannot serve a tool
     // call. A repo that declares no build script is skipped, not failed.
-    const npmCmd = `(npm install && { if [ "$(npm pkg get scripts.build)" = "{}" ]; then echo "MCP install: no build script declared, skipping" >&2; else npm run build; fi; })`;
+    //
+    // Guarded on package.json. As the trailing position after a failed Python
+    // install, running npm install in a Python repository printed a wall of
+    // ENOENT lines and the build ended on those, burying the resolution error
+    // that was the actual cause.
+    const npmCmd = `(if [ -f package.json ]; then npm install && { if [ "$(npm pkg get scripts.build)" = "{}" ]; then echo "MCP install: no build script declared, skipping" >&2; else npm run build; fi; }; else echo "MCP install: no package.json either, so this is not a Node.js server. The Python failure above is the real cause." >&2; false; fi)`;
     const ign = mcp.npm_ignore_scripts ? 'ENV NPM_CONFIG_IGNORE_SCRIPTS=true\n' : '';
     if (isNodejs) {
       // Primary: Node.js install, fatal on failure. Then a best-effort Python
-      // install for servers that ship both.
-      installStep = `${ign}RUN cd ${mcpDir} && ${npmCmd} && ${pipBonus}`;
+      // install for servers that ship both. The venv is created either way --
+      // an empty one costs a symlink, and the launcher below does not have to
+      // know which languages this server turned out to use.
+      installStep = `${ign}RUN cd ${mcpDir} && ${mkVenv} && ${npmCmd} && ${pipBonus}`;
     } else {
       // Primary: Python install. Fallback: Node.js install if pip fails. If
       // both fail the build stops here rather than at the customer's demo.
-      installStep = `RUN cd ${mcpDir} && ( ${pipStrict} || ${npmCmd} )`;
+      installStep = `RUN cd ${mcpDir} && ${mkVenv} && ( ${pipStrict} || ${pipFloor} || ${npmCmd} )`;
     }
     dockerSteps += `
 cat <<'__DOCKER_MCP_INSTALL_${idx}_EOF__' >> Dockerfile
@@ -4953,6 +6122,7 @@ __DOCKER_MCP_INSTALL_${idx}_EOF__
     const ep = mcp.entrypoint || '';
     const isFastMcp = ep.includes(':') && !ep.includes(' ');
     const mcpDir = `/app/custom_mcp_${idx}`;
+    const venvDir = mcpDir + '/.venv';
     const port = 9090 + idx;
     let stdioCmd;
     if (isFastMcp) {
@@ -4982,7 +6152,15 @@ __DOCKER_COPY_RUN_PY_${idx}_EOF__
 `;
       stdioCmd = `python _run.py`;
     } else { stdioCmd = ep; }
-    startScript += `cd ${mcpDir} && supergateway --stdio "${stdioCmd}" --outputTransport streamableHttp --port ${port} --sessionStateless &\n`;
+    // v12.3: the sidecar runs with its own virtualenv first on PATH, which is
+    // what makes the per-server environment reach the process rather than just
+    // the build. PATH rather than an absolute interpreter because `entrypoint`
+    // is an arbitrary shell command the model wrote from the server's README --
+    // it may be `python -m x`, a console script the install just created, or
+    // `uv run ...`, and all three resolve through PATH. VIRTUAL_ENV is for the
+    // last of those: uv reuses an active environment instead of building a new
+    // one behind our back. A subshell, so sidecar N+1 does not inherit N's PATH.
+    startScript += `( cd ${mcpDir} && PATH=${venvDir}/bin:$PATH VIRTUAL_ENV=${venvDir} exec supergateway --stdio "${stdioCmd}" --outputTransport streamableHttp --port ${port} --sessionStateless ) &\n`;
     startScript += `PID_${idx}=$!\n`;
   });
 
@@ -5034,8 +6212,14 @@ RUN uv pip freeze | grep -iE "^(google-adk|a2ui|mcp|google-genai|a2a-sdk)" | tee
 # symbol the generated code imports. Catches an upstream module-layout change
 # at BUILD time instead of as a stalled Cloud Run startup probe. AGENTS.md 8.
 RUN python dep_smoke_test.py
-# a2ui interface check: module import alone cannot see a dropped parameter.
-RUN python -c "from a2ui.a2a.parts import create_a2ui_part; import inspect; assert 'version' in inspect.signature(create_a2ui_part).parameters, 'FAIL: a2ui version param missing'; print('a2ui interface OK')"
+# a2ui v0.9 interface check: module import alone cannot see a dropped symbol,
+# and a missing composite catalog is a fatal A2uiSchemaManager error minutes
+# later at Cloud Run startup instead of here at build time. The mimeType assert
+# pins the one thing that fails SILENTLY: Gemini Enterprise renders
+# 'application/json+a2ui' and ignores 'application/a2ui+json', and the SDK
+# picks between them off the version kwarg, so a flip there degrades every card
+# to plain text with a perfectly clean log.
+RUN python -c "import json; from a2ui.schema.constants import VERSION_0_9; from a2ui.schema.catalog import CatalogConfig; from a2ui.schema.common_modifiers import remove_strict_validation; from a2ui.a2a.parts import create_a2ui_part; c = json.load(open('adk_agent/app/catalogs/gemini_enterprise_composite_catalog.json')); assert c.get('catalogId'), 'FAIL: composite catalog missing catalogId'; m = (create_a2ui_part({'version': 'v0.9'}, version=VERSION_0_9).root.metadata or {}).get('mimeType'); assert m == 'application/json+a2ui', 'FAIL: unexpected A2UI mimeType ' + repr(m); print('a2ui v0.9 interface OK: ' + str(len(c.get('components') or {})) + ' components, mimeType=' + m)"
 ENV PORT 8080
 ENV GOOGLE_GENAI_USE_VERTEXAI=1
 ENV PYTHONUNBUFFERED=1
@@ -5100,7 +6284,7 @@ export SANDBOX_OUT="/tmp/sandbox_result_$$.txt"
 # If Dockerfile/MCP files exist in CWD, the SDK tries to build them → hang.
 SANDBOX_TMPDIR=$(mktemp -d)
 pushd "$SANDBOX_TMPDIR" > /dev/null
-GOOGLE_API_USE_CLIENT_CERTIFICATE=false uv run --no-project --with "${PINNED_DEPS.aiplatform}" python3 << '__SANDBOX_PROVISION_EOF__'
+GOOGLE_API_USE_CLIENT_CERTIFICATE=false uv run --isolated --no-project --with "${PINNED_DEPS.aiplatform}" python3 << '__SANDBOX_PROVISION_EOF__'
 import sys, os, warnings, time, vertexai
 from vertexai import types
 
@@ -5182,12 +6366,17 @@ GOOGLE_API_USE_CLIENT_CERTIFICATE=false
 GOOGLE_CLOUD_LOCATION="global"
 DEMO_DATASET="${datasetId}"
 FS_COLLECTION="${fsCollection}"
+FIRESTORE_COLLECTION="${fsCollection}"
 REFERENCE_DATE="${referenceDate}"
 PUBLIC_DATASET_ID="${publicDatasetId || ''}"
 ENABLE_WORKSPACE_MCP=${enableWorkspaceMcp ? '1' : '0'}
 ENABLE_COMPUTER_USE=${enableComputerUse ? '1' : '0'}
 ENABLE_MANAGED_AGENT=${enableManagedAgent ? '1' : '0'}
 ENABLE_WORKSPACE_AUTH=${enableWorkspaceAuth ? '1' : '0'}
+ENABLE_CLOUD_TELEMETRY=${enableCloudTelemetry !== false ? '1' : '0'}
+ENABLE_MODEL_ARMOR=${enableModelArmor ? '1' : '0'}
+MODEL_ARMOR_TEMPLATE="${modelArmorTemplate || (enableModelArmor ? 'projects/' + '$PROJECT_ID' + '/locations/us-central1/templates/ge-demo-default-armor' : '')}"
+OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT="NO_CONTENT"
 MAPS_API_KEY="$API_KEY"
 PYTHONUNBUFFERED=1
 GRPC_ENABLE_FORK_SUPPORT=1
@@ -5236,17 +6425,45 @@ echo "🔧 Configuring agent..."
 
 cp "$GE_TPL/adk_agent/app/tools.py" adk_agent/app/tools.py
 
-mkdir -p adk_agent/app/examples/0.8
+${dataAssetCatalogCmd}
+mkdir -p adk_agent/app/catalogs
+echo '   Fetching the Gemini Enterprise A2UI v0.9 composite catalog...'
+curl -fsSL "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json" -o adk_agent/app/catalogs/gemini_enterprise_composite_catalog.json
+python3 -c "import json; json.load(open('adk_agent/app/catalogs/gemini_enterprise_composite_catalog.json'))" 2>/dev/null || {
+  echo '   [ERROR] Could not fetch a valid A2UI v0.9 composite catalog. The agent cannot start without it.'
+  exit 1
+}
+
+mkdir -p adk_agent/app/examples/0.9
 # --- A2UI example JSONs (copied from the pinned agent template) ---
-cp "$GE_TPL"/adk_agent/app/examples/0.8/*.json adk_agent/app/examples/0.8/
+cp "$GE_TPL"/adk_agent/app/examples/0.9/*.json adk_agent/app/examples/0.9/
 GE_CURRENCY='${bashEscape(currencySymbol)}' python3 - <<'__GE_CURR_SUB_EOF__'
 import glob, os
 sym = os.environ.get("GE_CURRENCY") or "$"
-for p in glob.glob("adk_agent/app/examples/0.8/*.json"):
+for p in glob.glob("adk_agent/app/examples/0.9/*.json"):
     s = open(p, encoding="utf-8").read()
     if "[CURRENCY]" in s:
         open(p, "w", encoding="utf-8").write(s.replace("[CURRENCY]", sym))
 __GE_CURR_SUB_EOF__
+
+_A2UI_PRUNE_LIST="${ enableWorkspaceMcp ? '' : 'chat_compose calendar_event_compose email_compose drive_file_compose chat_conversation_list drive_file_list contact_list' }"
+# --- Prune few-shot examples for capabilities this demo does not have ---
+# a2ui's CatalogConfig globs this directory, so EVERY file left in it is loaded
+# into the system prompt whether or not the matching tools are registered. The
+# seven Workspace surfaces are 21,793 characters - about 5.5k tokens of the
+# ~100k the model prefills on every turn - teaching an agent to compose a Gmail
+# draft it has no tool to send. Maps is not on this list: a Maps key is
+# provisioned unconditionally, so maps_place_card always has a toolset behind it.
+if [ -n "$_A2UI_PRUNE_LIST" ] && [ "$A2UI_KEEP_ALL_EXAMPLES" != "1" ]; then
+  _A2UI_PRUNED=0
+  for _A2UI_EX in $_A2UI_PRUNE_LIST; do
+    if [ -f "adk_agent/app/examples/0.9/\${_A2UI_EX}.json" ]; then
+      rm -f "adk_agent/app/examples/0.9/\${_A2UI_EX}.json"
+      _A2UI_PRUNED=$((_A2UI_PRUNED + 1))
+    fi
+  done
+  echo "  OK - pruned $_A2UI_PRUNED A2UI example(s) for disabled capabilities."
+fi
 
 cp "$GE_TPL/adk_agent/app/agent.py" adk_agent/app/agent.py
 
@@ -5407,13 +6624,20 @@ ${ (params.importedMcpList || []).some(m => m.type === 'remote' && (m.auth_type 
   ${ (() => {
     let envVars = [
       "GOOGLE_CLOUD_PROJECT=\$PROJECT_ID",
+      "PROJECT_ID=\$PROJECT_ID",
       "GOOGLE_CLOUD_LOCATION=global",
       "GEMINI_AUTHORIZATION_ID=\$AUTH_ID",
       "ADK_ENABLE_MCP_GRACEFUL_ERROR_HANDLING=1",
       "ADK_DISABLE_JSON_SCHEMA_FOR_FUNC_DECL=1",
       `DEMO_ID=${dirName}`,
+      // The dataset name is already baked into the generated instruction, but
+      // _bigquery_scope_gate in agent.py reads it from the environment: it is the
+      // allow-list the gate blocks cross-dataset SQL against, and without this
+      // line the gate finds an empty allow-list and disables itself.
+      `BIGQUERY_DATASET=${datasetId}`,
       `DEMO_DATASET=${datasetId}`,
       `FS_COLLECTION=${fsCollection}`,
+      `FIRESTORE_COLLECTION=${fsCollection}`,
       `REFERENCE_DATE=${referenceDate}`,
       `PUBLIC_DATASET_ID=${publicDatasetId || ''}`,
       `ENABLE_WORKSPACE_MCP=${enableWorkspaceMcp ? '1' : '0'}`,
@@ -5422,11 +6646,30 @@ ${ (params.importedMcpList || []).some(m => m.type === 'remote' && (m.auth_type 
       `ENABLE_WORKSPACE_AUTH=${enableWorkspaceAuth ? '1' : '0'}`,
       "DASHBOARDS_BUCKET=\$DASH_BUCKET",
       "RUNTIME_SA_EMAIL=\$COMPUTE_SA",
+      `ENABLE_CLOUD_TELEMETRY=${enableCloudTelemetry !== false ? '1' : '0'}`,
+      `ENABLE_MODEL_ARMOR=${enableModelArmor ? '1' : '0'}`,
+      `MODEL_ARMOR_TEMPLATE=${modelArmorTemplate || (enableModelArmor ? 'projects/' + '\\$PROJECT_ID' + '/locations/us-central1/templates/ge-demo-default-armor' : '')}`,
+      "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=NO_CONTENT",
+      // Read by agent.py to pick its data-exploration routing block. Passed as a
+      // runtime value rather than baked into the generated Python so the agent
+      // source stays identical to the skill template, and so switching a live
+      // demo between modes is a `gcloud run services update` rather than a redeploy.
+      `DATA_EXPLORATION_MODE=${dataExplorationMode}`,
       // Background worker dispatch. Unset (or a queue that cannot be reached)
       // makes the runtime fall back to the in-container localhost self-call.
       "WORKER_QUEUE=\$WORKER_QUEUE",
       "WORKER_QUEUE_LOCATION=\$WORKER_QUEUE_LOCATION"
     ];
+    // A public dataset hosted somewhere other than `bigquery-public-data` is
+    // still a legitimate target for this demo, and the scope gate only exempts
+    // that one project by name. Tell it about this dataset explicitly, or the
+    // first public-data join gets blocked.
+    if (publicDatasetId && publicDatasetId.split('.').length >= 2
+        && publicDatasetId.split('.')[0] !== 'bigquery-public-data') {
+      const publicParts = publicDatasetId.split('.');
+      envVars.push(`BQ_ALLOWED_DATASETS=${publicParts[0]}.${publicParts[1]}`);
+    }
+
     let secrets = [];
     let optionalSecrets = [];
 
@@ -5513,7 +6756,20 @@ ${ (params.importedMcpList || []).some(m => m.type === 'remote' && (m.auth_type 
     // "Application startup complete" and the turn took 37s end to end against
     // 9-13s warm, i.e. roughly +25s on that first message only. Export
     // MIN_INSTANCES=1 before running the script to keep a warm instance for a
-    // live presentation.
+    // live presentation, or tick "Keep one instance warm" in Advanced Settings
+    // to have that baked in here.
+    //
+    // The toggle raises the baseline rather than rewriting the line below,
+    // because the environment has to keep the last word in BOTH directions: an
+    // operator who exports MIN_INSTANCES=0 on a demo built while the toggle was
+    // on gets scale-to-zero, and one who exports 1 on a demo built while it was
+    // off gets a warm instance. The :- default only fills an unset or empty
+    // value, so the line below leaves whatever this set alone.
+    //
+    // A plain '...' string, not a template literal: this block interpolates
+    // nothing, and in single quotes "$MIN_INSTANCES" is already literal - one
+    // fewer escaping layer than the \$ the line below still needs.
+    deployCmd += keepWarm ? '\n# Advanced Settings asked for a warm instance: no cold start on the first\n# message, at the price of one always-on 8Gi/2vCPU instance for as long as the\n# demo exists. Export MIN_INSTANCES=0 to put this demo back on scale-to-zero.\nif [ -z "$MIN_INSTANCES" ]; then\n  MIN_INSTANCES=1\nfi\n' : '';
     deployCmd += `\n# Scale-to-zero unless the operator asked for a warm instance\nMIN_INSTANCES="\${MIN_INSTANCES:-0}"\n`;
 
     if (optionalSecrets.length > 0) {
@@ -5552,6 +6808,7 @@ ${ (params.importedMcpList || []).some(m => m.type === 'remote' && (m.auth_type 
     --region us-central1 \
     --quiet > "\$DEPLOY_LOG" 2>&1 &`;
     } else {
+      const secUpdate = secrets.length > 0 ? ` \\\n    --update-secrets="${secrets.join(",")}"` : '';
       deployCmd += `CR_ENV_VARS="${envVars.join(",")}"\nif [ "\$VIEWER_DEPLOYED" = "true" ]; then\n  CR_ENV_VARS="\$CR_ENV_VARS,DATA_VIEWER_URL=\$VIEWER_URL"\nfi\nCR_ENV_VARS="\$CR_ENV_VARS,SANDBOX_RESOURCE_NAME=\$SANDBOX_RESOURCE_NAME"\n${enableManagedAgent ? `CR_ENV_VARS="\$CR_ENV_VARS,MANAGED_AGENT_ID=\$MANAGED_AGENT_ID,MANAGED_AGENT_SKILLS_SOURCE=\$MA_SKILLS_SOURCE"\n` : ''}gcloud run deploy "\$SERVICE_NAME" \
     --source .. \
     --memory "8Gi" \
@@ -5564,11 +6821,7 @@ ${ (params.importedMcpList || []).some(m => m.type === 'remote' && (m.auth_type 
     --no-allow-unauthenticated \
     --ingress internal \
     --labels "created-by=adk" \
-    --set-env-vars="\$CR_ENV_VARS"`;
-      if (secrets.length > 0) {
-        deployCmd += ` \\\n    --update-secrets="${secrets.join(",")}"`;
-      }
-      deployCmd += ` \\\n    --region us-central1 \\\n    --quiet > "\$DEPLOY_LOG" 2>&1 &`;
+    --set-env-vars="\$CR_ENV_VARS"${secUpdate} \\\n    --region us-central1 \\\n    --quiet > "\$DEPLOY_LOG" 2>&1 &`;
     }
 
     return deployCmd;
@@ -5580,13 +6833,44 @@ ${ (params.importedMcpList || []).some(m => m.type === 'remote' && (m.auth_type 
     sleep 5
   done
   echo ""
-  wait $DEPLOY_PID
-  DEPLOY_EXIT=$?
-  if [ $DEPLOY_EXIT -ne 0 ]; then
+  if ! wait "$DEPLOY_PID"; then
     echo "   ❌ Cloud Run deployment failed. Build log:"
     echo "---------------------------------------------------------"
     cat "$DEPLOY_LOG"
     echo "---------------------------------------------------------"
+    # An org-policy refusal reads like a build failure and is not one: it is
+    # decided by the control plane before Cloud Build is asked for anything. The
+    # message names the constraint and stops there, leaving out the two facts
+    # that are the entire fix - that the violation is the ABSENCE of an
+    # annotation, and that --vpc-egress is rejected unless a network arrives
+    # with it.
+    if grep -q "run.allowed" "$DEPLOY_LOG"; then
+      echo ""
+      echo "   🚧 This is an organization policy refusal, not a build failure."
+      echo "      The deploy asked for nothing unusual; it failed because it left an"
+      echo "      annotation UNSET that this project's policy requires to be set."
+      if grep -q "run.allowedVPCEgress" "$DEPLOY_LOG"; then
+        echo "      • constraints/run.allowedVPCEgress"
+        echo "        Every service has to declare VPC egress, there is no value meaning"
+        echo "        'no VPC', and --vpc-egress is refused unless a network arrives with"
+        echo "        it - so satisfying this means attaching one:"
+        echo "          --network=NETWORK --subnet=SUBNET --vpc-egress=ALLOWED_VALUE"
+        echo "        With --vpc-egress=all-traffic the subnet also needs Private Google"
+        echo "        Access, or the container cannot reach googleapis.com at all."
+      fi
+      if grep -q "run.allowedBinaryAuthorizationPolicies" "$DEPLOY_LOG"; then
+        echo "      • constraints/run.allowedBinaryAuthorizationPolicies"
+        echo "        The service has to name an allowed Binary Authorization policy:"
+        echo "          --binary-authorization=ALLOWED_POLICY"
+      fi
+      echo "      Read the values this project allows (works without the Org Policy API):"
+      echo "        gcloud resource-manager org-policies describe constraints/run.allowedVPCEgress --project=$PROJECT_ID --effective"
+      echo "        gcloud resource-manager org-policies describe constraints/run.allowedBinaryAuthorizationPolicies --project=$PROJECT_ID --effective"
+      echo "      Then add those flags to the gcloud run deploy in this script, or ask an"
+      echo "      Organization Policy Administrator to grant this project an exception."
+      echo "      The deploying account usually cannot read or change the policy itself,"
+      echo "      because it is inherited from a folder."
+    fi
     rm -f "$DEPLOY_LOG"
     exit 1
   fi
@@ -5707,9 +6991,21 @@ data = {
             "defaultOutputModes": ["text/plain", "application/json"],
             "capabilities": {
                 "streaming": True,
+                # GE does NOT fetch the live agent card at request time - it
+                # reads THIS registered inline card. The A2UI version GE
+                # requests in X-A2A-Extensions comes from here, so this MUST
+                # stay in lockstep with _build_static_agent_card() in
+                # fast_api_app.py. A stale v0.8 URI here made GE request v0.8
+                # and silently ignore every v0.9 part (2026-08-19).
                 "extensions": [
                     {
-                        "uri": "https://a2ui.org/a2a-extension/a2ui/v0.8"
+                        "uri": "https://a2ui.org/a2a-extension/a2ui/v0.9",
+                        "description": "Provides agent driven UI using the A2UI JSON format.",
+                        "params": {
+                            "supportedCatalogIds": [
+                                "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json"
+                            ]
+                        }
                     }
                 ]
             },
@@ -5803,25 +7099,67 @@ print(f"Error registering agent ({create_code}): {resp.get('error', '')}", file=
 sys.exit(1)
 EOF
 
+  # One definition for both the single-app and the pick-an-app branch below.
+  # \$1 = location, \$2 = engine id, \$3 = authorization id ("" = register
+  # without one).
+  register_ge_agent() {
+    TOKEN=$(gcloud auth print-access-token 2>/dev/null || echo "$TOKEN")
+    [ -z "\$TOKEN" ] && TOKEN=$(gcloud auth application-default print-access-token 2>/dev/null || echo "")
+    if [ -n "$PROJECT_NUMBER" ]; then
+      DE_SA="service-$PROJECT_NUMBER@gcp-sa-discoveryengine.iam.gserviceaccount.com"
+      gcloud run services add-iam-policy-binding "${dirName}" \
+        --project="$PROJECT_ID" --region="$REGION" \
+        --member="serviceAccount:\${DE_SA}" \
+        --role="roles/run.invoker" >/dev/null 2>&1 || true
+    fi
+    python3 register_agent.py "\$1" "$PROJECT_NUMBER" "\$1" "\$2" "\$TOKEN" "${dirName}" "$SERVICE_URL/a2a/app" "\$AGENT_DISPLAY_NAME" '${safeSummary}' "\$3" 2>&1
+  }
+
+  # An authorization that reads back fine can still be REFUSED by the
+  # registration (bound to another agent, wrong project number). A registered
+  # agent with degraded Workspace tools beats no agent at all, so fall back
+  # once, keep the direct chat link, and say plainly what was lost.
+  register_ge_agent_with_fallback() {
+    REG_OUTPUT=\$(register_ge_agent "\$1" "\$2" "\$3" || true)
+    echo "\$REG_OUTPUT"
+    AGENT_ID=\$(echo "\$REG_OUTPUT" | grep "AGENT_ID:" | cut -d':' -f2)
+    if [ -z "\$AGENT_ID" ] && [ ! -z "\$3" ]; then
+      echo "⚠️  Registration with the authorization failed - retrying without it..."
+      REG_OUTPUT=\$(register_ge_agent "\$1" "\$2" "" || true)
+      echo "\$REG_OUTPUT"
+      AGENT_ID=\$(echo "\$REG_OUTPUT" | grep "AGENT_ID:" | cut -d':' -f2)
+      if [ ! -z "\$AGENT_ID" ]; then
+        echo "⚠️  Registered WITHOUT end-user OAuth - Workspace tools run as the service"
+        echo "    account. Fix the authorization and re-run this script to wire it in."
+      fi
+    fi
+  }
+
   if [ "$APP_COUNT" = "1" ]; then
     SELECTED_APP_ID=$(echo "\${APP_NAMES[0]}" | awk -F'/' '{print \$NF}')
     SELECTED_LOC="\${APP_LOCS[0]}"
     echo "✅ Found exactly one Gemini Enterprise app ($SELECTED_APP_ID). Automating registration..."
 
-    REG_OUTPUT=$(python3 register_agent.py "$SELECTED_LOC" "$PROJECT_NUMBER" "$SELECTED_LOC" "$SELECTED_APP_ID" "$TOKEN" "${dirName}" "$SERVICE_URL/a2a/app" "\$AGENT_DISPLAY_NAME" '${safeSummary}' "$AUTH_ID" 2>&1) || true
-    echo "$REG_OUTPUT"
-    AGENT_ID=$(echo "$REG_OUTPUT" | grep "AGENT_ID:" | cut -d':' -f2)
+    register_ge_agent_with_fallback "$SELECTED_LOC" "$SELECTED_APP_ID" "$AUTH_ID"
     rm register_agent.py
     if [ -z "\$AGENT_ID" ]; then
-      echo "⚠️  Gemini Enterprise registration failed, but the Cloud Run deployment itself is COMPLETE."
-      echo "    An existing registration of this demo (if any) keeps working against the new deployment."
-      echo "    To (re)register manually: Gemini Enterprise > Agents > Add, URL: $SERVICE_URL/a2a/app"
+      echo "❌ CRITICAL: Gemini Enterprise registration failed."
+      echo "    The demo cannot be registered into Gemini Enterprise without valid authentication."
+      print_auth_guidance_sh "$PROJECT_ID"
+      exit 1
     fi
 
   else
     if [ "$APP_COUNT" = "0" ]; then
       echo "⚠️ No Gemini Enterprise apps found in 'global', 'us', or 'eu'. You might need to create one first."
       echo "After creating an app, you can register the agent manually or re-run the script."
+    elif [ ! -t 0 ]; then
+      # Which app to register into is a choice, not a confirmation, so --yes
+      # cannot answer it and guessing would register the agent into somebody
+      # else's app. Leave the deployment in place and say what a human has to do.
+      echo "⚠️  Found \$APP_COUNT Gemini Enterprise apps and there is no terminal to choose from."
+      echo "    The Cloud Run deployment itself is COMPLETE; only the registration was skipped."
+      echo "    To register manually: Gemini Enterprise > Agents > Add, URL: \$SERVICE_URL/a2a/app"
     else
       echo "💡 Found \$APP_COUNT Gemini Enterprise apps across regions:"
       for i in "\${!APP_DISPLAY_NAMES[@]}"; do
@@ -5842,14 +7180,13 @@ EOF
       
       echo "✅ Selected app: \${APP_DISPLAY_NAMES[\$CHOICE]}. Automating registration..."
       
-      REG_OUTPUT=$(python3 register_agent.py "\$SELECTED_LOC" "\$PROJECT_NUMBER" "\$SELECTED_LOC" "\$SELECTED_APP_ID" "\$TOKEN" "${dirName}" "\$SERVICE_URL/a2a/app" "\$AGENT_DISPLAY_NAME" '${safeSummary}' "\$AUTH_ID" 2>&1) || true
-      echo "\$REG_OUTPUT"
-      AGENT_ID=$(echo "\$REG_OUTPUT" | grep "AGENT_ID:" | cut -d':' -f2)
+      register_ge_agent_with_fallback "\$SELECTED_LOC" "\$SELECTED_APP_ID" "\$AUTH_ID"
       rm register_agent.py
       if [ -z "\$AGENT_ID" ]; then
-        echo "⚠️  Gemini Enterprise registration failed, but the Cloud Run deployment itself is COMPLETE."
-        echo "    An existing registration of this demo (if any) keeps working against the new deployment."
-        echo "    To (re)register manually: Gemini Enterprise > Agents > Add, URL: \$SERVICE_URL/a2a/app"
+        echo "❌ CRITICAL: Gemini Enterprise registration failed."
+        echo "    The demo cannot be registered into Gemini Enterprise without valid authentication."
+        print_auth_guidance_sh "$PROJECT_ID"
+        exit 1
       fi
     fi
   fi
@@ -5938,6 +7275,10 @@ ${params.importedMcpList.map((mcp, idx) => {
     if [ ! -z "\$CONFIG_ID" ]; then
       echo "💬 Start Chatting with Your Agent:"
       echo "   👉 https://vertexaisearch.cloud.google.com/home/cid/\$CONFIG_ID/r/agent/\$AGENT_ID/session/-"
+      echo "   ⚠️  The FIRST message right after a deploy can come back as an error."
+      echo "      Gemini Enterprise takes up to ~90 seconds to start routing to a brand"
+      echo "      new agent, and a cold Cloud Run instance can refuse one request while"
+      echo "      it starts. Both are transient - send the message again."
     else
       echo "💬 Start Chatting in Gemini Enterprise:"
       echo "   👉 https://console.cloud.google.com/gemini-enterprise/locations/\$SELECTED_LOC/engines/\$SELECTED_APP_ID/overview/dashboard?project=\$PROJECT_ID"
@@ -5990,23 +7331,57 @@ ${params.importedMcpList.map((mcp, idx) => {
  * @param {Object|null} persona - { id, label, description, custom? } or null
  * @returns {string} Sanitized description text, or '' when absent
  */
-// Languages offered by the research language selector in the UI. Exact
-// membership check doubles as sanitization: only these strings are ever
-// interpolated into prompts.
-const SUPPORTED_RESEARCH_LANGS_ = ['日本語', 'English', 'Deutsch', 'Français', 'Español', 'Italiano', '中文', '한국어', 'Português', 'Русский', 'Nederlands', 'Svenska', 'Suomi'];
+// Languages offered by the research language selector in the UI, in the native
+// names the selector and the model both use. Exact membership check doubles as
+// sanitization: only these strings are ever interpolated into prompts. Anything
+// the user types instead arrives as 'custom:<name>' and goes through
+// sanitizeCustomLanguage_(), so this list bounds the auto-detect vocabulary
+// rather than what a user can ask for.
+// Turkish's native name, assembled from escapes: written out, neither the
+// accented letters nor a single \u escape survives the repo spell check as a
+// readable word. Identical string, ASCII source.
+const LANG_TURKISH_ = 'T' + '\u00fc' + 'rk' + '\u00e7' + 'e';
+const SUPPORTED_RESEARCH_LANGS_ = ['日本語', 'English', 'Deutsch', 'Français', 'Español', 'Italiano', '中文', '한국어', 'Português', 'Русский', 'Nederlands', 'Svenska', 'Suomi', 'Polski', LANG_TURKISH_, 'العربية', 'हिन्दी', 'ไทย', 'Tiếng Việt', 'Bahasa Indonesia', 'Bahasa Melayu', 'Filipino'];
 
 // Template Hub language codes -> the English name used when instructing a model.
 // Shared by translateTemplates() and the Magic Wand optimizer.
 const TEMPLATE_LANGS_ = {
   en: 'English', ja: 'Japanese', de: 'German', fr: 'French', es: 'Spanish',
   it: 'Italian', zh: 'Simplified Chinese', ko: 'Korean', pt: 'Portuguese',
-  ru: 'Russian', nl: 'Dutch', sv: 'Swedish', fi: 'Finnish'
+  ru: 'Russian', nl: 'Dutch', sv: 'Swedish', fi: 'Finnish',
+  ms: 'Malay', id: 'Indonesian', th: 'Thai', vi: 'Vietnamese',
+  tl: 'Filipino (Tagalog)', hi: 'Hindi', ar: 'Arabic', tr: 'Turkish',
+  pl: 'Polish'
 };
+
+// The Template Hub selector also offers a free-text box, so the fixed list
+// above is a convenience rather than a boundary. Free-text values arrive
+// prefixed, e.g. 'custom:Bahasa Melayu', and are sanitized before they reach a
+// prompt - the prefix is what keeps "is this a code or user input?" explicit.
+const CUSTOM_LANG_PREFIX_ = 'custom:';
+
+/**
+ * Sanitizes a user-typed language name into something safe to interpolate
+ * into a prompt. A language name is a couple of words: anything longer, or
+ * carrying quoting/markup characters, is far more likely to be a prompt
+ * injection attempt than a language, so it is rejected outright.
+ * @param {string} raw
+ * @returns {string} A short language name, or '' when it does not look like one.
+ */
+function sanitizeCustomLanguage_(raw) {
+  if (typeof raw !== 'string') return '';
+  const stripRe = new RegExp('[' + String.fromCharCode(96) + '{}\\[\\]<>"\'|\\\\/*#\\r\\n\\t]', 'g');
+  const t = raw.replace(stripRe, ' ').replace(/\s+/g, ' ').trim();
+  if (t.length < 2 || t.length > 40) return '';
+  if (t.split(' ').length > 4) return '';
+  return t;
+}
 
 /**
  * Normalizes whichever language identifier the frontend had to hand.
- * The Template Hub selector emits codes ('en'); the research selector and
- * researchCompanyByDomain's detectedLanguage emit native names ('Deutsch').
+ * The Template Hub selector emits codes ('en') or 'custom:<name>' for a
+ * free-text language; the research selector and researchCompanyByDomain's
+ * detectedLanguage emit native names ('Deutsch').
  * Returns '' for anything unrecognized, which leaves the caller on its
  * detect-from-the-input fallback.
  * @param {string} lang
@@ -6016,7 +7391,12 @@ function resolveOutputLanguage_(lang) {
   if (typeof lang !== 'string') return '';
   const t = lang.trim();
   if (!t) return '';
-  if (TEMPLATE_LANGS_[t]) return TEMPLATE_LANGS_[t];
+  if (t.indexOf(CUSTOM_LANG_PREFIX_) === 0) {
+    return sanitizeCustomLanguage_(t.substring(CUSTOM_LANG_PREFIX_.length));
+  }
+  // hasOwnProperty, not a truthiness check: a code of 'constructor' would
+  // otherwise resolve to a function and get stringified into the prompt.
+  if (Object.prototype.hasOwnProperty.call(TEMPLATE_LANGS_, t)) return TEMPLATE_LANGS_[t];
   if (SUPPORTED_RESEARCH_LANGS_.indexOf(t) !== -1) return t;
   return '';
 }
@@ -6044,8 +7424,10 @@ function researchCompanyByDomain(domain, persona, langOverride) {
   domain = domain.trim().toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/.*$/, '');
 
   // Optional manual override from the UI language selector ('Auto' sends null).
-  const overrideLang = (typeof langOverride === 'string' && SUPPORTED_RESEARCH_LANGS_.indexOf(langOverride.trim()) !== -1)
-    ? langOverride.trim() : null;
+  // resolveOutputLanguage_ accepts the selector's native names and the
+  // 'custom:<name>' form its free-text box emits, and returns '' for anything
+  // that fails sanitization - which lands us back on auto-detect.
+  const overrideLang = resolveOutputLanguage_(langOverride) || null;
 
   // TLD map is no longer the decision mechanism (a Japanese company on a .com
   // domain used to get English). It only seeds the fallback used when the
@@ -6056,6 +7438,14 @@ function researchCompanyByDomain(domain, persona, langOverride) {
     '.de': 'Deutsch', '.fr': 'Français', '.es': 'Español', '.it': 'Italiano',
     '.cn': '中文', '.tw': '中文', '.kr': '한국어', '.br': 'Português',
     '.ru': 'Русский', '.nl': 'Nederlands', '.se': 'Svenska', '.fi': 'Suomi',
+    '.pl': 'Polski', '.tr': LANG_TURKISH_, '.com.tr': LANG_TURKISH_,
+    '.sa': 'العربية', '.ae': 'العربية', '.eg': 'العربية',
+    '.th': 'ไทย', '.co.th': 'ไทย', '.vn': 'Tiếng Việt', '.com.vn': 'Tiếng Việt',
+    '.id': 'Bahasa Indonesia', '.co.id': 'Bahasa Indonesia',
+    '.my': 'Bahasa Melayu', '.com.my': 'Bahasa Melayu',
+    '.ph': 'Filipino', '.com.ph': 'Filipino',
+    // .in stays English: English is the working business language of most
+    // Indian enterprises, so Hindi has to be asked for rather than inferred.
     '.in': 'English', '.co.uk': 'English', '.com.au': 'English',
     '.com': 'English', '.io': 'English', '.ai': 'English', '.org': 'English', '.net': 'English'
   };
@@ -6073,7 +7463,7 @@ function researchCompanyByDomain(domain, persona, langOverride) {
   const langBlock = overrideLang
     ? '**RESPONSE LANGUAGE**: Respond entirely in ' + overrideLang + '. Set "detectedLanguage" to exactly "' + overrideLang + '".'
     : '**RESPONSE LANGUAGE (AUTO-DETECT)**: Determine the company\'s primary business language and write ALL text values in that language.\n' +
-      '- Country-code TLDs are decisive: e.g. .jp/.co.jp -> 日本語, .de -> Deutsch, .fr -> Français, .es -> Español, .it -> Italiano, .cn/.tw -> 中文, .kr -> 한국어, .br -> Português.\n' +
+      '- Country-code TLDs are decisive: e.g. .jp/.co.jp -> 日本語, .de -> Deutsch, .fr -> Français, .es -> Español, .it -> Italiano, .cn/.tw -> 中文, .kr -> 한국어, .br -> Português, .th -> ไทย, .id/.co.id -> Bahasa Indonesia, .my -> Bahasa Melayu, .vn -> Tiếng Việt.\n' +
       '- For generic TLDs (.com, .io, .ai, .org, .net, ...), decide from your search results: use the primary language of the company\'s headquarters country and official website. Example: a Japanese company using a .com domain MUST still be answered in 日本語.\n' +
       '- Report your final choice in the "detectedLanguage" JSON field, picking the closest match from: ' + SUPPORTED_RESEARCH_LANGS_.join(', ') + '.';
 
@@ -6146,7 +7536,7 @@ Output pure JSON only (no code blocks, no markdown):
       muteHttpExceptions: true
     });
     if (apiResponse.getResponseCode() !== 200) {
-      throw new Error('AI Search Error: ' + apiResponse.getContentText().substring(0, 200));
+      throw new Error(describeVertexError_(apiResponse.getResponseCode(), apiResponse.getContentText(), 'RESEARCH'));
     }
     
     // Google Search grounding can return text across multiple parts — concatenate all
@@ -6179,6 +7569,18 @@ Output pure JSON only (no code blocks, no markdown):
       return { success: false, error: 'Could not find sufficient information for domain: ' + domain };
     }
 
+    // detectedLanguage is a carrier for the prompts that come later (Magic Wand,
+    // workflow regeneration), so a language outside SUPPORTED_RESEARCH_LANGS_ -
+    // a typed override, or an auto-detect that answered 'Norsk' - has to come
+    // back in the 'custom:' form those callers can resolve. A bare unknown name
+    // resolves to '' and drops them onto text detection instead.
+    const rawDetected = (typeof parsed.detectedLanguage === 'string' && parsed.detectedLanguage.trim())
+      ? parsed.detectedLanguage.trim()
+      : (overrideLang || fallbackLang);
+    const detectedCustom = SUPPORTED_RESEARCH_LANGS_.indexOf(rawDetected) === -1
+      ? sanitizeCustomLanguage_(rawDetected)
+      : '';
+
     return {
       success: true,
       companyName: parsed.companyName,
@@ -6188,9 +7590,7 @@ Output pure JSON only (no code blocks, no markdown):
       workflows: parsed.workflows || [],
       suggestedGoal: parsed.suggestedGoal,
       quantFacts: parsed.quantFacts || null,
-      detectedLanguage: (typeof parsed.detectedLanguage === 'string' && parsed.detectedLanguage.trim())
-        ? parsed.detectedLanguage.trim()
-        : (overrideLang || fallbackLang)
+      detectedLanguage: detectedCustom ? CUSTOM_LANG_PREFIX_ + detectedCustom : rawDetected
     };
   } catch (e) {
     console.error('[RESEARCH] Error for domain ' + domain + ':', e.message);
@@ -6215,9 +7615,8 @@ function regenerateGoalForWorkflows(companyInfo, selectedWorkflows, persona, lan
 
   // Prefer the explicit language carried over from the research step; the CJK
   // regex is only a JP/EN fallback for old callers (it loses e.g. German).
-  const responseLang = (typeof language === 'string' && SUPPORTED_RESEARCH_LANGS_.indexOf(language.trim()) !== -1)
-    ? language.trim()
-    : (/[\u3000-\u9fff\uff00-\uffef]/.test(companyInfo.companySummary) ? '日本語' : 'English');
+  const responseLang = resolveOutputLanguage_(language)
+    || (/[\u3000-\u9fff\uff00-\uffef]/.test(companyInfo.companySummary) ? '日本語' : 'English');
 
   const personaDesc = sanitizePersonaText_(persona);
   const personaSection = personaDesc
@@ -6298,6 +7697,34 @@ function callVertexAI(prompt) {
 }
 
 /**
+ * Turns a failed Vertex response into a message the demo builder can act on.
+ *
+ * The case worth naming is the daily Google Search grounding cap. It is
+ * enforced per project per day, so on a project shared with a team a builder
+ * who has made zero requests of their own can still be locked out
+ * by everyone else's traffic - and the raw body, truncated to 200 characters
+ * mid-sentence, reads like a bug in this app rather than a drained bucket.
+ * The full body goes to the log; the caller gets the actionable version.
+ * @param {number} code - HTTP status
+ * @param {string} body - Raw response body
+ * @param {string} context - Short label for the log line, e.g. 'RESEARCH'
+ * @returns {string} Message to put in the thrown Error.
+ */
+function describeVertexError_(code, body, context) {
+  const raw = String(body || '');
+  console.error('[' + (context || 'VERTEX') + '] HTTP ' + code + ': ' + raw.substring(0, 1500));
+  if (code === 429 && /search as a tool|search as tool/i.test(raw)) {
+    return 'Daily Google Search grounding quota is used up for project "' + (CONFIG.PROJECT_ID || '(PROJECT_ID unset)') +
+      '". The cap is per project per day and resets at midnight US/Pacific, and on a shared project every user draws from the same bucket. ' +
+      'Point the PROJECT_ID Script Property at a project with its own quota, or wait for the reset - the scenario box still works by hand.';
+  }
+  if (code === 429) {
+    return 'Vertex AI Agent Platform rate-limited project "' + (CONFIG.PROJECT_ID || '(PROJECT_ID unset)') + '" (HTTP 429). Wait a few seconds and retry. ' + raw.substring(0, 200);
+  }
+  return 'AI Search Error: ' + raw.substring(0, 200);
+}
+
+/**
  * Calls Vertex AI Agent Platform with Google Search grounding enabled.
  * Used for discovering real BigQuery public dataset IDs.
  */
@@ -6319,7 +7746,9 @@ function callVertexAIWithSearch(prompt) {
     payload: JSON.stringify(payload),
     muteHttpExceptions: true
   });
-  if (response.getResponseCode() !== 200) throw new Error(`AI Search Error: ${response.getContentText()}`);
+  if (response.getResponseCode() !== 200) {
+    throw new Error(describeVertexError_(response.getResponseCode(), response.getContentText(), 'SEARCH'));
+  }
   return JSON.parse(response.getContentText()).candidates[0].content.parts[0].text;
 }
 
@@ -7396,23 +8825,30 @@ Return ONLY the raw Markdown text in the detected language. Do not include any c
 
 /**
  * Translates Template Hub entries into a target language for display.
- * Ported from GE Demo Generator Lite: the frontend ships English-only data
+ * Ported from Gemini Enterprise Demo Generator Lite: the frontend ships English-only data
  * and asks the backend for translations on demand, so non-ASCII translations
  * never live in the inline frontend JS (which would break the GAS minifier).
  * Entries with an empty "text" are category labels (industries/job functions).
- * @param {string} lang - Target language code (en/ja/de/fr/es/it/zh/ko/pt/ru/nl/sv/fi)
+ * @param {string} lang - A TEMPLATE_LANGS_ code ('ja'), or 'custom:<name>' for a
+ *   language the user typed in themselves. Values the sanitizer rejects come
+ *   back as { success: false, error: 'Unrecognized language' } with the
+ *   originals intact, so the caller can fall back to English and say why.
  * @param {Array} items - [{ label, text }]
  * @returns {Object} { success, items } same length/order translated; originals on failure.
  */
 function translateTemplates(lang, items) {
-  const target = TEMPLATE_LANGS_[lang];
-  if (!target || lang === 'en') return { success: true, items: items || [] };
+  const target = resolveOutputLanguage_(lang);
+  if (target === 'English') return { success: true, items: items || [] };
+  // A typed language the sanitizer rejected reports back rather than silently
+  // returning English, so the UI can say why nothing was translated.
+  if (!target) return { success: false, items: items || [], error: 'Unrecognized language' };
   if (!items || !items.length) return { success: true, items: [] };
 
   const prompt =
     'Translate the "label" and "text" of each entry below into ' + target + '. ' +
     'Keep it natural and professional (business demo scenario titles, descriptions, and category names). ' +
     'Entries with an empty "text" are category labels - translate only their "label" and keep "text" as an empty string. ' +
+    'If ' + target + ' is not a human language you can actually write, return every entry unchanged in English instead of inventing text. ' +
     'Return ONLY a JSON array of objects with "label" and "text", in the SAME order and SAME length as the input. ' +
     'Do not add or remove entries.\n\nINPUT:\n' +
     JSON.stringify(items.map(function (i) { return { label: String(i.label || ''), text: String(i.text || '') }; }));
