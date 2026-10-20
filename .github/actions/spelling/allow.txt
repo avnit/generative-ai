@@ -1,11 +1,13 @@
 aadd
 Aadila
+AAEC
 AALR
 AAVE
 aaxis
 ABG
 Abhishek
 acall
+ACAO
 achat
 Achird
 acked
@@ -157,8 +159,10 @@ Ayra
 Ayyappa
 backstory
 backticks
+bacme
 bagchi
 Bahasa
+bak
 Bakkali
 bargap
 barista
@@ -185,6 +189,7 @@ betulus
 Beyonce
 bff
 BFirst
+bfnrtu
 bgm
 Bgm
 BGM
@@ -243,6 +248,7 @@ brl
 Broadoak
 Brusdar
 Brynner
+BSB
 bshot
 bstep
 BTitle
@@ -355,6 +361,7 @@ colorway
 colurna
 colvis
 colwidth
+CTAs
 Cómo
 Condesa
 Connectez
@@ -418,7 +425,6 @@ cycleways
 cygpath
 CZE
 czf
-D'orsay
 DALL
 Daniil
 Darabont
@@ -450,6 +456,8 @@ Demme
 demoable
 demoed
 demouser
+Demuxer
+demuxer
 denorm
 dente
 Depatmint
@@ -458,7 +466,10 @@ derails
 Derpanis
 DERs
 descgen
+descs
 deskmates
+desync
+devbox
 devkey
 Dexin
 dflags
@@ -496,6 +507,8 @@ doi
 DOIs
 Donen
 Doogler
+D'orsay
+dotpath
 dotprompt
 Downscale
 dpf
@@ -503,6 +516,7 @@ dpi
 dpo
 DPO
 DPR
+dpr
 DQN
 draig
 Dreesen
@@ -519,6 +533,7 @@ dsl
 dsn
 dsnap
 DSQ
+dsv
 dtm
 dto
 DTOs
@@ -527,6 +542,7 @@ dtypes
 Duh
 dumfries
 dumpd
+DUNBRAE
 dunia
 Duonebs
 Durafast
@@ -646,6 +662,7 @@ fewshot
 fffbeb
 ffi
 ffprobe
+fft
 FHIR
 FIA
 fibonacci
@@ -711,6 +728,8 @@ fsreq
 fsspec
 FTPS
 fts
+Ftyp
+ftyp
 Fudd
 fulltext
 fullurl
@@ -746,10 +765,12 @@ gcp
 gcs
 gcsfs
 gcurl
+gdesc
 gdk
 gdkx
 GDM
 gdp
+Gdpi
 gdrive
 geboten
 gecos
@@ -777,6 +798,7 @@ gfile
 GFile
 Gfm
 gguf
+ghchinoy
 ghcr
 giallo
 Giallo
@@ -799,9 +821,13 @@ Gmb
 GmbH
 gms
 gmtime
+gname
 GObject
+godotenv
 Godzilla
+gofmt
 Gojo
+golangci
 goldmine
 Gombe
 GOODALL
@@ -831,11 +857,14 @@ gridspec
 groupadd
 groupchat
 grpcio
+grules
 gshoe
 gsm
 GSM
 gsod
 gspread
+gst
+gstat
 gstatic
 GSUITE
 gsutil
@@ -902,6 +931,7 @@ Hisaki
 historien
 histplot
 HITL
+Hiya
 Hlc
 hline
 Hmmm
@@ -914,6 +944,7 @@ honoured
 Hoodi
 Horamavu
 Hossein
+hostport
 hotpotqa
 hovermode
 hparams
@@ -927,6 +958,7 @@ HTTH
 https
 httpx
 Hubmann
+hvc
 HVDC
 hwnd
 hypercorn
@@ -1001,6 +1033,7 @@ isdir
 isess
 isfile
 Islington
+isom
 itable
 itables
 itb
@@ -1015,8 +1048,8 @@ ixed
 izakaya
 ize
 ized
-J'aime
 jaccard
+J'aime
 JAISH
 Jaival
 japonicum
@@ -1121,11 +1154,10 @@ Kwanzan
 kyc
 KYC
 Kylian
-L'avenir
-l'harmonie
 labelleft
 labetalol
 Ladhak
+laggy
 LAION
 lakecolor
 LANCZOS
@@ -1135,6 +1167,7 @@ langgraph
 Laomedeia
 lastb
 latte
+L'avenir
 lavfi
 lbl
 LCEL
@@ -1149,6 +1182,7 @@ levelname
 Leventer
 lexer
 lexers
+l'harmonie
 liberties
 libmp
 lic
@@ -1200,6 +1234,7 @@ lsof
 LSTATUS
 LSTM
 LSum
+ltd
 LTRB
 luhrmann
 Luhrmann
@@ -1252,6 +1287,7 @@ Mcps
 MCQ
 mdc
 MDD
+mdia
 Meawad
 mec
 MEDIANCUT
@@ -1293,6 +1329,7 @@ middot
 Milito
 millis
 Minato
+minf
 Mirai
 miranda
 Misaki
@@ -1319,6 +1356,7 @@ modelfile
 Molaison
 monty
 Mookie
+moov
 morty
 Mosi
 movflags
@@ -1345,6 +1383,7 @@ MTurk
 multiline
 multitool
 mundo
+muxed
 Mvar
 mvn
 mvnw
@@ -1425,6 +1464,7 @@ NNN
 noaa
 noabe
 nobserved
+nodesep
 nodularis
 nohup
 nokey
@@ -1452,10 +1492,12 @@ ntheory
 NTILE
 ntry
 nunique
+NVFP
 nvidia
 NVIDIA
 NVL
 NYT
+NZD
 oai
 objc
 ocr
@@ -1509,6 +1551,7 @@ ord
 orgpolicy
 ORGPOLICY
 Orus
+osc
 osm
 oss
 osx
@@ -1601,6 +1644,8 @@ pkce
 pkl
 pks
 playlists
+Playout
+playout
 PLLu
 pllum
 plotly
@@ -1626,6 +1671,7 @@ Ponyo
 Popken
 popleft
 Porat
+portapack
 PORTFILE
 Portugu
 postictal
@@ -1720,6 +1766,7 @@ Rajpurkar
 Ramblas
 ramen
 randint
+ranksep
 Ranurte
 rapideval
 raquin
@@ -1737,6 +1784,7 @@ reallocations
 reauth
 Reauth
 REAUTH
+reconst
 recontext
 Recontext
 recrawl
@@ -1779,6 +1827,7 @@ ripgrep
 Rivertown
 Rivia
 Rizzoli
+RLA
 RLHF
 rlines
 rlog
@@ -1927,10 +1976,13 @@ sku
 SKUs
 SLAs
 slf
+slowloris
 Smartbuy
 Smaug
 SMB
 SMCC
+sme
+SMEs
 Smol
 smolagent
 SMSN
@@ -1959,6 +2011,7 @@ sqm
 SRE
 srlimit
 srt
+srv
 ssd
 sse
 ssh
@@ -1972,6 +2025,7 @@ SSZ
 STARTPTS
 Statcast
 staticmethod
+stbl
 stdcall
 stext
 stitle
@@ -1985,8 +2039,10 @@ strdupv
 streamlit
 strfreev
 strptime
+stsd
 stt
 stuffie
+subchecks
 subclip
 SUBLANG
 submodule
@@ -2112,6 +2168,7 @@ Topolino
 Toranomon
 toself
 toset
+Tpng
 tpot
 TPOT
 tprogress
@@ -2121,6 +2178,7 @@ tqdm
 traceloop
 Traceloop
 trailcam
+trak
 treeah
 triaging
 Tribbiani
@@ -2147,6 +2205,7 @@ ttext
 ttf
 ttfb
 TTFB
+TTFF
 ttft
 TTFT
 TTH
@@ -2226,6 +2285,7 @@ uvb
 uvicorn
 uvx
 UVX
+vad
 VAEs
 vais
 Valtteri
@@ -2295,11 +2355,13 @@ vulnz
 vurl
 Wafae
 wafaeb
+WAFs
 WAI
 Wakatipu
 waterjet
 WAU
 Wavenet
+wcag
 wcontext
 wcslen
 wdir
